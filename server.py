@@ -33,10 +33,13 @@ async def ws_endpoint(ws: WebSocket):
                     }))
                 elif data.get("type") == "input_audio_buffer.append":
                     audio = data["audio"]
+                    # 여기서 script 따고, type을 delta 혹은 transcript로 보내기
                     await ws.send_text(json.dumps({
-                        "type": "script",
-                        "delta": "wwsssd"
+                        "type": "delta",
+                        "text": "a"
                     }))
+                elif data.get("type") == "scriptsession.start":
+                    print("scriptsession.start")
                 elif data.get("type") == "session.close":
                     await ws.send_text(json.dumps({
                         "type": "session.close",
