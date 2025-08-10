@@ -43,6 +43,27 @@ async def ws_endpoint(ws: WebSocket):
                 if t == "scriptsession.start":
                     if sess.oai_ws is None:
                         sess.oai_ws = await open_openai_ws()
+                        initMsg = {
+                        "type": 'transcription_session.update',
+                        "session": {
+                            "input_audio_format": 'pcm16',
+                            "input_audio_transcription": {
+                                "model": 'gpt-4o-mini-transcribe',
+                                "prompt": '',
+                                "language": data.get("language")[:2],
+                            },
+                            "turn_detection": {
+                                "type": 'server_vad',
+                                "threshold": 0.4,
+                                "prefix_padding_ms": 200,
+                                "silence_duration_ms": 100,
+                            },
+                            "input_audio_noise_reduction": { "type": 'far_field' },
+                        },
+                        };
+
+                        # 연결 직후 OpenAI 세션에 초기 메시지 전송
+                        await sess.oai_ws.send(json.dumps(initMsg))
                         # OpenAI 이벤트를 클라로 릴레이하는 백그라운드 태스크
                         sess.oai_task = asyncio.create_task(relay_openai_to_client(sess, ws))
                         await ws.send_text(json.dumps({"type": "scriptsession.started"}))
@@ -112,7 +133,7 @@ async def open_openai_ws():
     if not OPENAI_KEY:
         raise RuntimeError("OPENAI_KEY not set")
 
-    url = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-transcribe"
+    url = "wss://api.openai.com/v1/realtime?intent=transcription"
     headers = {
         "Authorization": f"Bearer {OPENAI_KEY}",
         "OpenAI-Beta": "realtime=v1",
