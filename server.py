@@ -34,14 +34,18 @@ class Session:
         self.current_translated: str = ''
         self.translateds: list[str] = []
 
+        # 송신을 Queue로 관리
+        self.out_q: asyncio.Queue[str] = asyncio.Queue()
+        self.sender_task: Optional[asyncio.Task] = None
+
         # --- TTS용 필드, text buffer 단위 speech 생성 ---
         self.tts_ws = None
         self.tts_task: Optional[asyncio.Task] = None
         self.tts_in_q: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
 
-        # 송신을 Queue로 관리
-        self.out_q: asyncio.Queue[str] = asyncio.Queue()
-        self.sender_task: Optional[asyncio.Task] = None
+        # onToken에서 단어/프레이즈 coalescing용
+        self.tts_buf: list[str] = []
+        self.tts_debounce_task: Optional[asyncio.Task] = None
 
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
 
@@ -296,6 +300,7 @@ async def run_translate_async(sess: Session) -> str:
     # 콜백: 스레드에서 실행됨. 이벤트 루프에 안전하게 put 예약
     def on_token(tok: str):
         # 토큰을 버퍼에 쌓고 짧게 디바운스 (2~3단어 프레이즈로 묶이고 말끝 쉼표/스페이스에서 순간 flush)
+        print("on_token : ", tok)
         sess.tts_buf.append(tok)
         if sess.tts_debounce_task and not sess.tts_debounce_task.done():
             sess.tts_debounce_task.cancel()
@@ -317,10 +322,12 @@ async def run_translate_async(sess: Session) -> str:
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
     final_text = await loop.run_in_executor(None, run_blocking)
+    print("final_text : ", final_text)
 
     # 번역 끝났으면 마지막 남은 조각 flush
     if sess.tts_debounce_task and not sess.tts_debounce_task.done():
         sess.tts_debounce_task.cancel()
+    
     # 즉시 플러시
     def _flush_now():
         if sess.tts_buf:
