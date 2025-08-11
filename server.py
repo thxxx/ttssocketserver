@@ -266,7 +266,9 @@ async def run_translate_async(sess: Session) -> str:
         )
 
     # 동기 작업을 thread로
-    final_text = await asyncio.to_thread(run_blocking)
+    loop = asyncio.get_running_loop()
+    final_text = await loop.run_in_executor(None, run_blocking)
+    # final_text = await asyncio.to_thread(run_blocking)
 
     # 최종 결과 알림
     await sess.out_q.put(jdumps({"type": "translated", "text": final_text}))
