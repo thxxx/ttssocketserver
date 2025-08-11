@@ -1,14 +1,11 @@
-import os
 import asyncio
 import json
 from datetime import datetime
 from typing import Dict, Optional
-
+from llm.openai import translate
+from stt.openai import open_openai_ws
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from websockets.asyncio.client import connect as ws_connect  # pip install websockets
 from websockets.exceptions import ConnectionClosed
-
-OPENAI_KEY = os.environ.get("OPENAI_KEY")
 
 app = FastAPI()
 
@@ -18,6 +15,11 @@ class Session:
         self.oai_ws = None  # OpenAI WS 연결
         self.oai_task: Optional[asyncio.Task] = None  # OAI -> Client listener task
         self.running = True
+
+        self.current_transcript: str = ''
+        self.transcripts: list[str] = []
+        self.current_translated: str = ''
+        self.translateds: list[str] = []
 
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
 
@@ -50,7 +52,7 @@ async def ws_endpoint(ws: WebSocket):
                             "input_audio_transcription": {
                                 "model": 'gpt-4o-mini-transcribe',
                                 "prompt": '',
-                                "language": data.get("language")[:2],
+                                "language": (data.get("language") or "en")[:2],
                             },
                             "turn_detection": {
                                 "type": 'server_vad',
@@ -62,8 +64,9 @@ async def ws_endpoint(ws: WebSocket):
                         },
                         };
 
-                        # 연결 직후 OpenAI 세션에 초기 메시지 전송
+                        # 연결 직후 OpenAI 세션에 초기 메시지 전송 for setting up session
                         await sess.oai_ws.send(json.dumps(initMsg))
+
                         # OpenAI 이벤트를 클라로 릴레이하는 백그라운드 태스크
                         sess.oai_task = asyncio.create_task(relay_openai_to_client(sess, ws))
                         await ws.send_text(json.dumps({"type": "scriptsession.started"}))
@@ -120,68 +123,100 @@ async def ws_endpoint(ws: WebSocket):
         await teardown_session(sess)
         sessions.pop(id(ws), None)
 
-async def open_openai_ws():
-    """
-    OpenAI Realtime(Transcribe) WS 연결 생성.
-    문서 기준:
-    - URL: wss://api.openai.com/v1/realtime?model=gpt-4o-mini-transcribe
-      (또는 transcription intent를 쓰는 변형)
-    - Headers:
-        Authorization: Bearer <OPENAI_KEY>
-        OpenAI-Beta: realtime=v1
-    """
-    if not OPENAI_KEY:
-        raise RuntimeError("OPENAI_KEY not set")
 
-    url = "wss://api.openai.com/v1/realtime?intent=transcription"
-    headers = {
-        "Authorization": f"Bearer {OPENAI_KEY}",
-        "OpenAI-Beta": "realtime=v1",
-    }
-    # websockets.connect 에서는 'additional_headers' 인자 사용
-    return await ws_connect(url, additional_headers=headers)
-
-
+# 3) relay_openai_to_client 수정본
 async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
-    """
-    OpenAI → 서버 → 클라이언트 릴레이.
-    OpenAI가 보내는 이벤트 타입 예:
-      - transcript.delta / transcript.completed (모델/모드에 따라)
-      - response.delta / response.completed (응답 스트림 계열)
-      - error
-    들어오는 raw JSON을 그대로 넘기거나, 필요한 최소만 매핑해서 넘긴다.
-    """
     try:
         async for raw in sess.oai_ws:
-            # OpenAI 쪽은 문자열 프레임(JSON)로 온다
             try:
                 evt = json.loads(raw)
             except Exception:
-                # 파싱 실패 시 원문 그대로 전달
                 await client_ws.send_text(raw)
                 continue
 
-            # 최소 매핑: delta 텍스트만 빠르게 중계
             etype = evt.get("type", "")
-            # 전사 스트림 계열 가정
+
             if etype.endswith(".delta"):
-                # 가능한 필드 이름 케이스를 호환
-                # 예: { type: "transcript.delta", delta: "..." } or { ... "text": "..." }
                 text = evt.get("delta") or evt.get("text") or evt.get("content") or ""
-                await client_ws.send_text(json.dumps({"type": "delta", "text": text}))
+                asyncio.create_task(
+                    client_ws.send_text(json.dumps({"type": "delta", "text": text}))
+                )
+
             elif etype.endswith(".completed"):
-                final_text = evt.get("text") or evt.get("content") or ""
-                await client_ws.send_text(json.dumps({"type": "transcript", "text": final_text, "final": True}))
+                # 3-1) 최종 전사 수신
+                final_text = (evt.get("transcript") or evt.get("content") or "").strip()
+                await client_ws.send_text(json.dumps({
+                    "type": "transcript", "text": final_text, "final": True
+                }))
+
+                # 3-2) 연결별 누적 전사 업데이트
+                # 공백 관리: 앞에 뭔가 있으면 한 칸 띄우고 붙이기
+                if sess.current_transcript:
+                    sess.current_transcript += " " + final_text
+                else:
+                    sess.current_transcript = final_text
+
+                # 3-3) 번역 스트리밍 콜백
+                async def onToken(token: str):
+                    await client_ws.send_text(json.dumps({
+                        "type": "translated_delta", "text": token
+                    }))
+                
+                print("---------------번역 시작-----------------")
+                print("prevScripts", sess.transcripts[-5:])
+                print("current_scripted_sentence", sess.current_transcript)
+                print("current_translated", sess.current_translated)
+
+                # 3-4) 번역 호출 (최근 스크립트 히스토리 전달)
+                translated_text = await translate(
+                    prevScripts=sess.transcripts[-5:],
+                    current_scripted_sentence=sess.current_transcript,
+                    current_translated=sess.current_translated,
+                    onToken=onToken,
+                )
+
+                await client_ws.send_text(json.dumps({
+                    "type": "translated", "text": translated_text
+                }))
+
+                translated_text = translated_text.replace("<SKIP>", "")
+                if translated_text == "":
+                    return
+
+                # 3-5) 누적 번역 업데이트 (공백 관리)
+                if sess.current_translated:
+                    sess.current_translated += " " + translated_text
+                else:
+                    sess.current_translated = translated_text
+
+                # 3-6) 문장 종료(<END>) 처리
+                if "<END>" in translated_text:
+                    # 저장 시에는 <END> 제거해서 넣는 걸 권장
+                    def strip_end(s: str) -> str:
+                        return s.replace("<END>", "").strip()
+
+                    sess.transcripts.append(sess.current_transcript.strip())
+                    sess.translateds.append(strip_end(sess.current_translated))
+
+                    # 다음 문장 누적용 버퍼 비우기
+                    sess.current_transcript = ""
+                    sess.current_translated = ""
+
             elif etype == "error":
-                await client_ws.send_text(json.dumps({"type": "error", "message": evt.get("error", evt)}))
+                await client_ws.send_text(json.dumps({
+                    "type": "error", "message": evt.get("error", evt)
+                }))
             else:
-                # 디버그용: 필요한 경우 전체 이벤트 전달
-                await client_ws.send_text(json.dumps({"type": "oai_event", "event": evt}))
+                await client_ws.send_text(json.dumps({
+                    "type": "oai_event", "event": evt
+                }))
 
     except ConnectionClosed:
         pass
     except Exception as e:
-        await client_ws.send_text(json.dumps({"type": "error", "message": f"OAI relay error: {e}"}))
+        await client_ws.send_text(json.dumps({
+            "type": "error", "message": f"OAI relay error: {e}"
+        }))
 
 
 async def teardown_session(sess: Session):
