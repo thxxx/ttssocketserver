@@ -299,20 +299,16 @@ async def run_translate_async(sess: Session) -> str:
 
     # 콜백: 스레드에서 실행됨. 이벤트 루프에 안전하게 put 예약
     def on_token(tok: str):
-        # 토큰을 버퍼에 쌓고 짧게 디바운스 (2~3단어 프레이즈로 묶이고 말끝 쉼표/스페이스에서 순간 flush)
-        print("on_token : ", tok)
-        sess.tts_buf.append(tok)
-
-        try:
+        # 콜백은 타 스레드에서 불릴 수 있으므로,
+        # 모든 상태 변경을 루프 스레드에서 수행하도록 래핑
+        def _append_and_schedule():
+            # 여기부터는 이벤트 루프 스레드
+            sess.tts_buf.append(tok)
+            # 기존 디바운스 태스크 취소도 루프 스레드에서만!
             if sess.tts_debounce_task and not sess.tts_debounce_task.done():
                 sess.tts_debounce_task.cancel()
-        
-            # 루프에서 디바운스 예약
-            loop.call_soon_threadsafe(
-                lambda: setattr(sess, "tts_debounce_task", asyncio.create_task(debounce_flush(80)))
-            )
-        except Exception as e:
-            print("on_token error", e)
+            sess.tts_debounce_task = asyncio.create_task(debounce_flush(80))
+        loop.call_soon_threadsafe(_append_and_schedule)
 
     def run_blocking():
         # 동기 translate 호출
@@ -332,14 +328,12 @@ async def run_translate_async(sess: Session) -> str:
     if sess.tts_debounce_task and not sess.tts_debounce_task.done():
         sess.tts_debounce_task.cancel()
     
-    # 즉시 플러시
-    def _flush_now():
-        if sess.tts_buf:
-            chunk = "".join(sess.tts_buf).strip()
-            sess.tts_buf.clear()
-            if chunk:
-                sess.tts_in_q.put_nowait(chunk)
-    loop.call_soon_threadsafe(_flush_now)
+    # 번역 종료 시, 남은 디바운스/버퍼 처리도 루프 스레드에서만
+    def _final_flush():
+        if sess.tts_debounce_task and not sess.tts_debounce_task.done():
+            sess.tts_debounce_task.cancel()
+        flush_tts_chunk()
+    loop.call_soon_threadsafe(_final_flush)
 
     # 최종 결과 알림
     await sess.out_q.put(jdumps({"type": "translated", "text": final_text}))
