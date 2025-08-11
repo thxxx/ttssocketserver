@@ -281,9 +281,11 @@ async def run_translate_async(sess: Session) -> str:
 
 
     def flush_tts_chunk():
+        print("flush_tts_chunk")
         if not sess.tts_buf:
             return
         chunk = "".join(sess.tts_buf).strip()
+        print("chunk : ", chunk)
         sess.tts_buf.clear()
         if not chunk:
             return
@@ -362,6 +364,7 @@ async def elevenlabs_streamer(
             async def recv_loop():
                 try:
                     async for msg in ws:
+                        print("elevenlabs_streamer recv_loop msg", msg)
                         try:
                             data = json.loads(msg)
                         except Exception:
@@ -384,8 +387,7 @@ async def elevenlabs_streamer(
                             await sess.out_q.put(jdumps({"type":"tts_info","payload":data}))
                         
                 except Exception as e:
-                    print("elevenlabs_streamer error", e)
-                    pass
+                    print("elevenlabs_streamer recv_loop error", e)
 
             async def send_loop():
                 try:
@@ -399,8 +401,8 @@ async def elevenlabs_streamer(
                             "text": text_chunk,
                             "try_trigger_generation": True
                         }))
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("elevenlabs_streamer send_loop error", e)
             
             recv_task = asyncio.create_task(recv_loop())
             send_task = asyncio.create_task(send_loop())
