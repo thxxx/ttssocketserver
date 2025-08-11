@@ -156,6 +156,10 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                     sess.current_transcript += " " + final_text
                 else:
                     sess.current_transcript = final_text
+                
+                if len(sess.current_transcript) < 5:
+                    print("Wait more sess.current_transcript : ", sess.current_transcript)
+                    return
 
                 # 3-3) 번역 스트리밍 콜백
                 def onToken(token: str):
@@ -169,7 +173,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 print("current_translated", sess.current_translated)
 
                 # 3-4) 번역 호출 (최근 스크립트 히스토리 전달)
-                translated_text = await translate(
+                translated_text = translate(
                     prevScripts=sess.transcripts[-5:],
                     current_scripted_sentence=sess.current_transcript,
                     current_translated=sess.current_translated,
