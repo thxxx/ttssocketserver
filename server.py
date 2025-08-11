@@ -357,8 +357,8 @@ async def elevenlabs_streamer(
             # 초기 설정 전송 (옵션)
             await ws.send(jdumps({
                 "voice_settings": {"stability": 0.5, "similarity_boost": 0.8, "speed": 1.0},
-                "xi_api_key": api_key
             }))
+            print("elevenlabs first setting done")
 
             # 수신 루프와 송신 루프를 동시에 돌리기
             async def recv_loop():
@@ -403,7 +403,15 @@ async def elevenlabs_streamer(
             
             recv_task = asyncio.create_task(recv_loop())
             send_task = asyncio.create_task(send_loop())
-            await asyncio.wait({recv_task, send_task}, return_when=asyncio.FIRST_COMPLETED)
+            
+            # ✅ 수신 루프 기준으로 종료를 제어
+            await recv_task
+            # 수신이 끝났다면 송신 태스크를 정리
+            if not send_task.done():
+                send_task.cancel()
+                with contextlib.suppress(Exception):
+                    await send_task
+            
     except Exception as e:
         await sess.out_q.put(jdumps({"type":"tts_error","message":str(e)}))
     finally:
