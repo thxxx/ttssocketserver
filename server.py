@@ -281,14 +281,12 @@ async def run_translate_async(sess: Session) -> str:
 
 
     def flush_tts_chunk():
-        print("flush_tts_chunk")
-        if not sess.tts_buf:
+        print("flush_tts_chunk", sess.tts_buf)
+        if not sess.tts_buf or len(sess.tts_buf) == 0:
             return
         chunk = "".join(sess.tts_buf).strip()
         print("chunk : ", chunk)
         sess.tts_buf.clear()
-        if not chunk:
-            return
         # 스레드→루프 안전하게 큐에 push
         loop.call_soon_threadsafe(sess.tts_in_q.put_nowait, chunk)
 
