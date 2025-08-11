@@ -302,13 +302,17 @@ async def run_translate_async(sess: Session) -> str:
         # 토큰을 버퍼에 쌓고 짧게 디바운스 (2~3단어 프레이즈로 묶이고 말끝 쉼표/스페이스에서 순간 flush)
         print("on_token : ", tok)
         sess.tts_buf.append(tok)
-        if sess.tts_debounce_task and not sess.tts_debounce_task.done():
-            sess.tts_debounce_task.cancel()
+
+        try:
+            if sess.tts_debounce_task and not sess.tts_debounce_task.done():
+                sess.tts_debounce_task.cancel()
         
-        # 루프에서 디바운스 예약
-        loop.call_soon_threadsafe(
-            lambda: setattr(sess, "tts_debounce_task", asyncio.create_task(debounce_flush(80)))
-        )
+            # 루프에서 디바운스 예약
+            loop.call_soon_threadsafe(
+                lambda: setattr(sess, "tts_debounce_task", asyncio.create_task(debounce_flush(80)))
+            )
+        except Exception as e:
+            print("on_token error", e)
 
     def run_blocking():
         # 동기 translate 호출
