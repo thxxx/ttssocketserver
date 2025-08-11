@@ -168,9 +168,10 @@ Only output the new translation. No explanations or additional text.
 
     sent = ''
     for chunk in response:
-        print(chunk.choices[0].delta.content, end="", flush=True)
-        onToken(chunk.choices[0].delta.content)
-        sent += chunk.choices[0].delta.content
+        if chunk.choices[0].delta.content != '' and chunk.choices[0].delta.content is not None:
+            print(chunk.choices[0].delta.content, end="", flush=True)
+            onToken(chunk.choices[0].delta.content)
+            sent += chunk.choices[0].delta.content
 
     return sent
 

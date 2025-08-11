@@ -138,6 +138,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
 
             if etype.endswith(".delta"):
                 text = evt.get("delta") or evt.get("text") or evt.get("content") or ""
+                print("delta : ", text)
                 asyncio.create_task(
                     client_ws.send_text(json.dumps({"type": "delta", "text": text}))
                 )
@@ -157,10 +158,10 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                     sess.current_transcript = final_text
 
                 # 3-3) 번역 스트리밍 콜백
-                async def onToken(token: str):
-                    await client_ws.send_text(json.dumps({
+                def onToken(token: str):
+                    asyncio.create_task(client_ws.send_text(json.dumps({
                         "type": "translated_delta", "text": token
-                    }))
+                    })))
                 
                 print("---------------번역 시작-----------------")
                 print("prevScripts", sess.transcripts[-5:])
@@ -180,7 +181,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 }))
 
                 translated_text = translated_text.replace("<SKIP>", "")
-                if translated_text == "":
+                if translated_text == "" or translated_text is None:
                     return
 
                 # 3-5) 누적 번역 업데이트 (공백 관리)
