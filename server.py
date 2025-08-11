@@ -391,7 +391,8 @@ async def elevenlabs_streamer(
                         print("send_loop text_chunk", text_chunk)
                         if not text_chunk:
                             # 입력 종료 신호로 사용할 수도 있음
-                            await ws.send(jdumps({"text": ""}))
+                            # await ws.send(jdumps({"text": ""}))
+                            continue
                         else:
                             await ws.send(jdumps({
                                 "text": text_chunk,
