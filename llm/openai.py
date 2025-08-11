@@ -10,11 +10,10 @@ def translate(prevScripts:str, current_scripted_sentence:str, current_translated
     response = client.chat.completions.create(
         model='gpt-4.1-mini',  # 최신 경량 모델
         messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "system", "content": "You are a helpful assistant, real-time Korean-to-English translator. Your job is to incrementally translate Korean speech as it comes in."},
             {"role": "user", "content": f"""
-You are a real-time Korean-to-English translator. Your job is to incrementally translate Korean speech as it comes in.
-
 # INPUT FORMAT:
+- <prevScripts>: Previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural, mitigating scripting errors. **Never translate the prevScripts**.
 - <current_scripted_sentence>: Current Korean sentence from speech recognition (may contain pronunciation errors)
 - <translated_history>: Parts of the current sentence that were already translated to English previously
 

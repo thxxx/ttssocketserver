@@ -7,8 +7,14 @@ from stt.openai import open_openai_ws
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
 import orjson as json  # loads/dumps 호환 아님
+import os
+import websockets
+import base64
 
 def jdumps(o): return json.dumps(o).decode()  # bytes -> str
+
+VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "wj5ree7FcgKDPFphpPWQ")
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 
 app = FastAPI()
 
@@ -27,6 +33,11 @@ class Session:
         self.transcripts: list[str] = []
         self.current_translated: str = ''
         self.translateds: list[str] = []
+
+        # --- TTS용 필드, text buffer 단위 speech 생성 ---
+        self.tts_ws = None
+        self.tts_task: Optional[asyncio.Task] = None
+        self.tts_in_q: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
 
         # 송신을 Queue로 관리
         self.out_q: asyncio.Queue[str] = asyncio.Queue()
@@ -59,32 +70,43 @@ async def ws_endpoint(ws: WebSocket):
                     if sess.oai_ws is None:
                         sess.oai_ws = await open_openai_ws()
                         initMsg = {
-                        "type": 'transcription_session.update',
-                        "session": {
-                            "input_audio_format": 'pcm16',
-                            "input_audio_transcription": {
-                                "model": 'gpt-4o-mini-transcribe',
-                                "prompt": '',
-                                "language": (data.get("language") or "en")[:2],
+                            "type": 'transcription_session.update',
+                            "session": {
+                                "input_audio_format": 'pcm16',
+                                "input_audio_transcription": {
+                                    "model": 'gpt-4o-mini-transcribe',
+                                    "prompt": '',
+                                    "language": (data.get("language") or "en")[:2],
+                                },
+                                "turn_detection": {
+                                    "type": 'server_vad',
+                                    "threshold": 0.4,
+                                    "prefix_padding_ms": 200,
+                                    "silence_duration_ms": 150,
+                                },
+                                "input_audio_noise_reduction": { "type": 'far_field' },
                             },
-                            "turn_detection": {
-                                "type": 'server_vad',
-                                "threshold": 0.4,
-                                "prefix_padding_ms": 200,
-                                "silence_duration_ms": 100,
-                            },
-                            "input_audio_noise_reduction": { "type": 'far_field' },
-                        },
                         };
 
                         # 연결 직후 OpenAI 세션에 초기 메시지 전송 for setting up session
                         await sess.oai_ws.send(jdumps(initMsg))
+
+                        # --- ElevenLabs TTS 스트리머 시작 ---
+                        # voice_id, api_key는 너의 환경/설정에서 가져오도록
+                        sess.tts_task = asyncio.create_task(
+                            elevenlabs_streamer(sess,
+                                                voice_id=VOICE_ID,
+                                                api_key=ELEVENLABS_API_KEY,
+                                                output_format="mp3_22050_32")  # 가볍게 빠르게
+                        )
 
                         # OpenAI 이벤트를 클라로 릴레이하는 백그라운드 태스크
                         sess.oai_task = asyncio.create_task(relay_openai_to_client(sess, ws))
                         await ws.send_text(jdumps({"type": "scriptsession.started"}))
                     else:
                         await ws.send_text(jdumps({"type": "warn", "message": "already started"}))
+                    
+
 
                 # 2) 오디오 append → OAI로 그대로 전달
                 elif t == "input_audio_buffer.append":
@@ -220,15 +242,20 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
 
 async def teardown_session(sess: Session):
     sess.running = False
+    if sess.tts_task:
+        sess.tts_task.cancel()
+        with contextlib.suppress(Exception):
+            await sess.tts_task
     if sess.oai_task:
         sess.oai_task.cancel()
         with contextlib.suppress(Exception):
             await sess.oai_task
     if sess.oai_ws:
-        try:
+        with contextlib.suppress(Exception):
             await sess.oai_ws.close()
-        except Exception:
-            pass
+    if sess.tts_ws:
+        with contextlib.suppress(Exception):
+            await sess.tts_ws.close()
 
 async def outbound_sender(sess: Session, client_ws: WebSocket):
     try:
@@ -248,12 +275,34 @@ async def run_translate_async(sess: Session) -> str:
     """
     loop = asyncio.get_running_loop()
 
+
+    def flush_tts_chunk():
+        if not sess.tts_buf:
+            return
+        chunk = "".join(sess.tts_buf).strip()
+        sess.tts_buf.clear()
+        if not chunk:
+            return
+        # 스레드→루프 안전하게 큐에 push
+        loop.call_soon_threadsafe(sess.tts_in_q.put_nowait, chunk)
+
+    async def debounce_flush(delay_ms: int = 80):
+        try:
+            await asyncio.sleep(delay_ms / 1000)
+            flush_tts_chunk()
+        except asyncio.CancelledError:
+            pass
+
     # 콜백: 스레드에서 실행됨. 이벤트 루프에 안전하게 put 예약
     def on_token(tok: str):
-        # (A) 아주 가벼운 브리지: put_nowait를 스레드세이프로 예약
+        # 토큰을 버퍼에 쌓고 짧게 디바운스 (2~3단어 프레이즈로 묶이고 말끝 쉼표/스페이스에서 순간 flush)
+        sess.tts_buf.append(tok)
+        if sess.tts_debounce_task and not sess.tts_debounce_task.done():
+            sess.tts_debounce_task.cancel()
+        
+        # 루프에서 디바운스 예약
         loop.call_soon_threadsafe(
-            sess.out_q.put_nowait,
-            jdumps({"type": "translated_delta", "text": tok})
+            lambda: setattr(sess, "tts_debounce_task", asyncio.create_task(debounce_flush(80)))
         )
 
     def run_blocking():
@@ -268,11 +317,91 @@ async def run_translate_async(sess: Session) -> str:
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
     final_text = await loop.run_in_executor(None, run_blocking)
-    # final_text = await asyncio.to_thread(run_blocking)
+
+    # 번역 끝났으면 마지막 남은 조각 flush
+    if sess.tts_debounce_task and not sess.tts_debounce_task.done():
+        sess.tts_debounce_task.cancel()
+    # 즉시 플러시
+    def _flush_now():
+        if sess.tts_buf:
+            chunk = "".join(sess.tts_buf).strip()
+            sess.tts_buf.clear()
+            if chunk:
+                sess.tts_in_q.put_nowait(chunk)
+    loop.call_soon_threadsafe(_flush_now)
 
     # 최종 결과 알림
     await sess.out_q.put(jdumps({"type": "translated", "text": final_text}))
     return final_text
+
+async def elevenlabs_streamer(
+        sess: Session, 
+        voice_id: str, 
+        api_key: str,
+        output_format: str = "mp3_22050_32"
+    ):
+    url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?output_format={output_format}"
+    headers = [("xi-api-key", api_key)]
+    try:
+        async with websockets.connect(url, extra_headers=headers, max_size=None) as ws:
+            sess.tts_ws = ws
+            # 초기 설정 전송 (옵션)
+            await ws.send(jdumps({
+                "voice_settings": {"stability": 0.5, "similarity_boost": 0.8, "speed": 1.0},
+                "xi_api_key": api_key
+            }))
+
+            # 수신 루프와 송신 루프를 동시에 돌리기
+            async def recv_loop():
+                try:
+                    async for msg in ws:
+                        try:
+                            data = json.loads(msg)
+                        except Exception:
+                            # 예외적으로 바이너리일 경우 그대로 패스 (거의 없음)
+                            await sess.out_q.put(jdumps({"type":"tts_raw","payload":str(type(msg))}))
+                            continue
+
+                        # 오디오 청크 수신
+                        if "audio" in data:
+                            # 그대로 클라로 전달 (클라에서 base64 디코드하여 재생)
+                            await sess.out_q.put(jdumps({
+                                "type": "tts_audio",
+                                "format": output_format,
+                                "audio": data["audio"],
+                                "isFinal": data.get("isFinal", False),
+                            }))
+                        
+                        # 기타 메타/에러
+                        if "warning" in data or "error" in data:
+                            await sess.out_q.put(jdumps({"type":"tts_info","payload":data}))
+                        
+                except Exception as e:
+                    print("elevenlabs_streamer error", e)
+                    pass
+
+            async def send_loop():
+                try:
+                    while sess.running:
+                        text_chunk = await sess.tts_in_q.get()
+                        if not text_chunk:
+                            # 입력 종료 신호로 사용할 수도 있음
+                            await ws.send(jdumps({"text": ""}))
+                            continue
+                        await ws.send(jdumps({
+                            "text": text_chunk,
+                            "try_trigger_generation": True
+                        }))
+                except Exception:
+                    pass
+            
+            recv_task = asyncio.create_task(recv_loop())
+            send_task = asyncio.create_task(send_loop())
+            await asyncio.wait({recv_task, send_task}, return_when=asyncio.FIRST_COMPLETED)
+    except Exception as e:
+        await sess.out_q.put(jdumps({"type":"tts_error","message":str(e)}))
+    finally:
+        sess.tts_ws = None
 
 
 # 필요 import
