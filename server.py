@@ -365,12 +365,7 @@ async def elevenlabs_streamer(
                 try:
                     async for msg in ws:
                         print("elevenlabs_streamer recv_loop msg", msg)
-                        try:
-                            data = json.loads(msg)
-                        except Exception:
-                            # 예외적으로 바이너리일 경우 그대로 패스 (거의 없음)
-                            await sess.out_q.put(jdumps({"type":"tts_raw","payload":str(type(msg))}))
-                            continue
+                        data = json.loads(msg)
 
                         # 오디오 청크 수신
                         if "audio" in data:
@@ -393,14 +388,15 @@ async def elevenlabs_streamer(
                 try:
                     while sess.running:
                         text_chunk = await sess.tts_in_q.get()
+                        print("send_loop text_chunk", text_chunk)
                         if not text_chunk:
                             # 입력 종료 신호로 사용할 수도 있음
                             await ws.send(jdumps({"text": ""}))
-                            continue
-                        await ws.send(jdumps({
-                            "text": text_chunk,
-                            "try_trigger_generation": True
-                        }))
+                        else:
+                            await ws.send(jdumps({
+                                "text": text_chunk,
+                                "try_trigger_generation": True
+                            }))
                 except Exception as e:
                     print("elevenlabs_streamer send_loop error", e)
             
