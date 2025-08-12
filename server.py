@@ -11,6 +11,7 @@ import os
 import websockets
 import base64
 import re
+import time
 
 def jdumps(o): return json.dumps(o).decode()  # bytes -> str
 
@@ -22,6 +23,10 @@ app = FastAPI()
 DEBUG = False
 def dprint(*a, **k): 
     if DEBUG: print(*a, **k)
+
+LOGG = True
+def lprint(*a, **k): 
+    if LOGG: print(*a, **k)
 
 # 클라이언트 1명당 OpenAI Realtime WS를 하나씩 유지하기 위한 세션 상태
 class Session:
@@ -47,6 +52,11 @@ class Session:
         # onToken에서 단어/프레이즈 coalescing용
         self.tts_buf: list[str] = []
         self.tts_debounce_task: Optional[asyncio.Task] = None
+
+        # variables for logging
+        self.end_scripting_time = 0
+        self.end_translation_time = 0
+        self.end_tts_time = 0
 
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
 
@@ -110,8 +120,6 @@ async def ws_endpoint(ws: WebSocket):
                         await ws.send_text(jdumps({"type": "scriptsession.started"}))
                     else:
                         await ws.send_text(jdumps({"type": "warn", "message": "already started"}))
-                    
-
 
                 # 2) 오디오 append → OAI로 그대로 전달
                 elif t == "input_audio_buffer.append":
@@ -182,28 +190,31 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
             elif etype.endswith(".completed"):
                 # 3-1) 최종 전사 수신
                 final_text = (evt.get("transcript") or evt.get("content") or "").strip()
+                sess.end_scripting_time = time.time()
+                
                 await sess.out_q.put(jdumps({
                     "type": "transcript", "text": final_text, "final": True
                 }))
 
                 # 3-2) 연결별 누적 전사 업데이트
-                # 공백 관리: 앞에 뭔가 있으면 한 칸 띄우고 붙이기
                 if sess.current_transcript:
                     sess.current_transcript += " " + final_text
                 else:
                     sess.current_transcript = final_text
                 
-                if len(sess.current_transcript) < 5:
+                if len(sess.current_transcript) < 3:
                     continue
                 
-                print("prevScripts", sess.transcripts[-5:])
-                print("current_scripted_sentence", sess.current_transcript)
-                print("current_translated", sess.current_translated)
+                dprint("prevScripts", sess.transcripts[-5:])
+                dprint("current_scripted_sentence", sess.current_transcript)
+                dprint("current_translated", sess.current_translated)
 
                 # --- 여기부터 교체 ---
                 # 동기 translate를 스레드에서 비동기처럼 실행(스트리밍 콜백 유지)
                 translated_text = await run_translate_async(sess)
                 # --- 교체 끝 ---
+                sess.end_translation_time = time.time()
+                lprint("translation time : ", sess.end_translation_time - sess.end_scripting_time)
 
                 translated_text = translated_text.replace("<SKIP>", "")
                 if translated_text == "" or translated_text is None:
@@ -287,19 +298,19 @@ async def run_translate_async(sess: Session) -> str:
         chunk = "".join(sess.tts_buf).strip()
         chunk = re.sub(r"<[^>]*>", "", chunk)
 
-        print("[flush_tts_chunk] ", repr(chunk))
+        dprint("[flush_tts_chunk] ", repr(chunk))
         sess.tts_buf.clear()
         try:
             sess.tts_in_q.put_nowait(chunk)
         except asyncio.QueueFull:
-            print("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
+            dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
 
     async def debounce_flush(delay_ms: int = 80):
         try:
             await asyncio.sleep(delay_ms / 1000)
             flush_tts_chunk()
         except asyncio.CancelledError as e:
-            print("[debounce_flush] WARN: debounce_flush cancelled", e)
+            dprint("[debounce_flush] WARN: debounce_flush cancelled", e)
 
     def on_token(tok: str):
         # 다른 스레드에서 불릴 수 있으므로 루프 스레드로 래핑
@@ -322,7 +333,7 @@ async def run_translate_async(sess: Session) -> str:
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
     final_text = await loop.run_in_executor(None, run_blocking)
-    print("final_text : ", final_text)
+    dprint("final_text : ", final_text)
 
     if sess.tts_debounce_task and not sess.tts_debounce_task.done():
         sess.tts_debounce_task.cancel()
@@ -345,7 +356,7 @@ async def elevenlabs_streamer(
         output_format: str = "mp3_22050_32",
         keepalive_interval: int = 15
     ):
-    url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input"
+    url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_flash_v2_5&output_format={output_format}"
     headers = [("xi-api-key", api_key)]
     try:
         async with websockets.connect(url, extra_headers=headers, max_size=None) as elws:
@@ -359,15 +370,18 @@ async def elevenlabs_streamer(
                     "xi_api_key": api_key  # 헤더 + 바디 둘 다 주면 가장 호환성 좋음
                 }))
             except Exception as e:
-                print("[elevenlabs_streamer] initial warmup send error:", e)
+                dprint("[elevenlabs_streamer] initial warmup send error:", e)
 
             async def recv_loop():
-                print("[elevenlabs_streamer] recv_loop START")
+                dprint("[elevenlabs_streamer] recv_loop START")
                 try:
                     async for msg in elws:
-                        print("[elevenlabs_streamer] recv_loop msg", msg)
+                        dprint("[elevenlabs_streamer] recv_loop msg", msg)
                         # ElevenLabs는 text 프레임(JSON)로 응답
                         data = json.loads(msg)
+                        sess.end_tts_time = time.time()
+                        lprint("tts time : ", sess.end_tts_time - sess.end_translation_time)
+
                         # 오디오 청크
                         if "audio" in data:
                             await sess.out_q.put(jdumps({
@@ -380,38 +394,40 @@ async def elevenlabs_streamer(
                         if "warning" in data or "error" in data:
                             await sess.out_q.put(jdumps({"type":"tts_info","payload":data}))
                 except Exception as e:
-                    print("[elevenlabs_streamer] recv_loop error:", e)
+                    dprint("[elevenlabs_streamer] recv_loop error:", e)
                     raise
                 finally:
-                    print("[elevenlabs_streamer] recv_loop END")
+                    dprint("[elevenlabs_streamer] recv_loop END")
 
             async def send_loop():
-                print("[elevenlabs_streamer] send_loop START")
+                dprint("[elevenlabs_streamer] send_loop START")
                 try:
                     while sess.running:
                         text_chunk = await sess.tts_in_q.get()
-                        print("[elevenlabs_streamer] send_loop waiting for text_chunk", text_chunk)
+                        dprint("[elevenlabs_streamer] send_loop waiting for text_chunk", text_chunk)
 
                         if not (text_chunk and text_chunk.strip()):
                             continue
                     
-                        print("[elevenlabs_streamer] send_loop →", repr(text_chunk))
+                        dprint("[elevenlabs_streamer] send_loop →", repr(text_chunk))
+                        lprint("Time until start generation : ", time.time() - sess.end_translation_time)
+
                         await elws.send(jdumps({
                             "text": text_chunk + ".",
                             "try_trigger_generation": True
                         }))
                         await elws.send(jdumps({"text": ""}))
                 except asyncio.CancelledError:
-                    print("[elevenlabs_streamer] send_loop CANCELLED")
+                    dprint("[elevenlabs_streamer] send_loop CANCELLED")
                     raise
                 except Exception as e:
-                    print("[elevenlabs_streamer] send_loop error:", e)
+                    dprint("[elevenlabs_streamer] send_loop error:", e)
                     raise
                 finally:
-                    print("[elevenlabs_streamer] send_loop END")
+                    dprint("[elevenlabs_streamer] send_loop END")
 
             async def keepalive_loop():
-                print("[elevenlabs_streamer] keepalive_loop START")
+                dprint("[elevenlabs_streamer] keepalive_loop START")
                 try:
                     while sess.running:
                         await asyncio.sleep(keepalive_interval)
@@ -421,15 +437,15 @@ async def elevenlabs_streamer(
                                 "text": " ",
                                 "try_trigger_generation": False
                             }))
-                            print("[elevenlabs_streamer] keepalive sent")
+                            dprint("[elevenlabs_streamer] keepalive sent")
                         except Exception as e:
-                            print("[elevenlabs_streamer] keepalive error:", e)
+                            dprint("[elevenlabs_streamer] keepalive error:", e)
                             raise
                 except asyncio.CancelledError:
-                    print("[elevenlabs_streamer] keepalive_loop CANCELLED")
+                    dprint("[elevenlabs_streamer] keepalive_loop CANCELLED")
                     raise
                 finally:
-                    print("[elevenlabs_streamer] keepalive_loop END")
+                    dprint("[elevenlabs_streamer] keepalive_loop END")
 
             recv_task = asyncio.create_task(recv_loop())
             send_task = asyncio.create_task(send_loop())
@@ -446,23 +462,23 @@ async def elevenlabs_streamer(
                 t.cancel()
                 with contextlib.suppress(Exception):
                     await t
-            print(f"\n\nPrint for check End : {done} \n\n")
+            dprint(f"\n\nPrint for check End : {done} \n\n")
     except asyncio.CancelledError:
-        print("[elevenlabs_streamer] Main task cancelled.")
+        dprint("[elevenlabs_streamer] Main task cancelled.")
     except Exception as e:
-        print(f"[elevenlabs_streamer] An unexpected error occurred: {e}")
+        dprint(f"[elevenlabs_streamer] An unexpected error occurred: {e}")
         await sess.out_q.put(jdumps({"type": "tts_error", "message": str(e)}))
     finally:
         # ✅ CRITICAL FIX: Send the End-of-Stream (EOS) message before closing.
         if sess.tts_ws and sess.tts_ws.open:
-            print("[elevenlabs_streamer] Sending End-of-Stream message.")
+            dprint("[elevenlabs_streamer] Sending End-of-Stream message.")
             try:
                 await sess.tts_ws.send(jdumps({"text": ""}))
             except Exception as e:
-                print(f"[elevenlabs_streamer] Failed to send EOS message: {e}")
+                dprint(f"[elevenlabs_streamer] Failed to send EOS message: {e}")
         
         sess.tts_ws = None
-        print("[elevenlabs_streamer] Connection closed and cleaned up.")
+        dprint("[elevenlabs_streamer] Connection closed and cleaned up.")
 
 # 필요 import
 import contextlib
