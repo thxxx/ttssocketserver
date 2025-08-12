@@ -85,13 +85,14 @@ async def ws_endpoint(ws: WebSocket):
                 if t == "scriptsession.start":
                     if sess.oai_ws is None:
                         sess.oai_ws = await open_openai_ws()
+                        model_name = data.get("model") or 'gpt-4o-mini-transcribe'
                         
                         initMsg = {
                             "type": 'transcription_session.update',
                             "session": {
                                 "input_audio_format": 'pcm16',
                                 "input_audio_transcription": {
-                                    "model": 'gpt-4o-mini-transcribe',
+                                    "model": model_name,
                                     "prompt": '',
                                     "language": (data.get("language") or "en")[:2],
                                 },
