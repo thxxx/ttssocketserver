@@ -186,8 +186,9 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
             etype = evt.get("type", "")
 
             if etype.endswith(".delta"):
-                text = evt.get("delta") or evt.get("text") or evt.get("content") or ""
-                await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
+                # text = evt.get("delta") or evt.get("text") or evt.get("content") or ""
+                # await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
+                pass
             elif etype.endswith(".completed"):
                 # 3-1) 최종 전사 수신
                 final_text = (evt.get("transcript") or evt.get("content") or "").strip()
