@@ -388,9 +388,9 @@ async def elevenlabs_streamer(
                 print("[elevenlabs_streamer] send_loop START")
                 try:
                     while sess.running:
-                        print("[elevenlabs_streamer] send_loop waiting for text_chunk", text_chunk)
                         text_chunk = await sess.tts_in_q.get()
-                        
+                        print("[elevenlabs_streamer] send_loop waiting for text_chunk", text_chunk)
+
                         if not (text_chunk and text_chunk.strip()):
                             continue
                         payload = {
