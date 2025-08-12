@@ -54,6 +54,7 @@ class Session:
         self.tts_debounce_task: Optional[asyncio.Task] = None
 
         # variables for logging
+        self.start_scripting_time = 0
         self.end_scripting_time = 0
         self.end_translation_time = 0
         self.end_tts_time = 0
@@ -354,7 +355,7 @@ async def elevenlabs_streamer(
         voice_id: str, 
         api_key: str,
         output_format: str = "mp3_22050_32",
-        keepalive_interval: int = 15
+        keepalive_interval: int = 18
     ):
     url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_flash_v2_5&output_format={output_format}"
     headers = [("xi-api-key", api_key)]
@@ -376,7 +377,6 @@ async def elevenlabs_streamer(
                 dprint("[elevenlabs_streamer] recv_loop START")
                 try:
                     async for msg in elws:
-                        dprint("[elevenlabs_streamer] recv_loop msg", msg)
                         # ElevenLabs는 text 프레임(JSON)로 응답
                         data = json.loads(msg)
                         sess.end_tts_time = time.time()
@@ -384,12 +384,15 @@ async def elevenlabs_streamer(
 
                         # 오디오 청크
                         if "audio" in data:
+                            dprint("[elevenlabs_streamer] Is Final? : ", len(data['audio']), data["isFinal"])
                             await sess.out_q.put(jdumps({
                                 "type": "tts_audio",
                                 "format": output_format,
                                 "audio": data["audio"],
                                 "isFinal": data.get("isFinal", False),
                             }))
+                        else:
+                            dprint("[elevenlabs_streamer] recv_loop msg", msg)
                         # 경고/오류
                         if "warning" in data or "error" in data:
                             await sess.out_q.put(jdumps({"type":"tts_info","payload":data}))
@@ -404,19 +407,15 @@ async def elevenlabs_streamer(
                 try:
                     while sess.running:
                         text_chunk = await sess.tts_in_q.get()
-                        dprint("[elevenlabs_streamer] send_loop waiting for text_chunk", text_chunk)
-
                         if not (text_chunk and text_chunk.strip()):
                             continue
                     
                         dprint("[elevenlabs_streamer] send_loop →", repr(text_chunk))
-                        lprint("Time until start generation : ", time.time() - sess.end_translation_time)
-
                         await elws.send(jdumps({
-                            "text": text_chunk + ".",
+                            "text": text_chunk,
                             "try_trigger_generation": True
                         }))
-                        await elws.send(jdumps({"text": ""}))
+                        # await elws.send(jdumps({"text": ""}))
                 except asyncio.CancelledError:
                     dprint("[elevenlabs_streamer] send_loop CANCELLED")
                     raise
