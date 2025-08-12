@@ -304,7 +304,7 @@ async def run_translate_async(sess: Session) -> str:
         try:
             chunks = chunk.split(" ")
             for i in range(0, len(chunks), 3):
-                if i+5 >= len(chunks):
+                if i+4 >= len(chunks):
                     sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
                     break
                 else:
@@ -418,10 +418,10 @@ async def elevenlabs_streamer(
                     
                         dprint("[elevenlabs_streamer] send_loop →", repr(text_chunk))
                         await elws.send(jdumps({
-                            "text": text_chunk + " ",
+                            "text": text_chunk + ".",
                             "try_trigger_generation": True
                         }))
-                        await elws.send(jdumps({"text": ""}))
+                        # await elws.send(jdumps({"text": ""}))
                 except asyncio.CancelledError:
                     dprint("[elevenlabs_streamer] send_loop CANCELLED")
                     raise
