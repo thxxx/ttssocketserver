@@ -85,6 +85,7 @@ async def ws_endpoint(ws: WebSocket):
                 if t == "scriptsession.start":
                     if sess.oai_ws is None:
                         sess.oai_ws = await open_openai_ws()
+                        
                         initMsg = {
                             "type": 'transcription_session.update',
                             "session": {
@@ -103,30 +104,31 @@ async def ws_endpoint(ws: WebSocket):
                                 "input_audio_noise_reduction": { "type": 'far_field' },
                             },
                         };
-
                         # 연결 직후 OpenAI 세션에 초기 메시지 전송 for setting up session
                         await sess.oai_ws.send(jdumps(initMsg))
 
                         # --- ElevenLabs TTS 스트리머 시작 ---
-                        # voice_id, api_key는 너의 환경/설정에서 가져오도록
                         sess.tts_task = asyncio.create_task(
-                            elevenlabs_streamer(sess,
-                                                voice_id=VOICE_ID,
-                                                api_key=ELEVENLABS_API_KEY,
-                                                output_format="mp3_22050_32")  # 가볍게 빠르게
+                            elevenlabs_streamer(
+                                sess,
+                                voice_id=VOICE_ID,
+                                api_key=ELEVENLABS_API_KEY,
+                                output_format="mp3_22050_32"
+                            )
                         )
 
-                        # OpenAI 이벤트를 클라로 릴레이하는 백그라운드 태스크
+                        # OpenAI 이벤트를 client로 릴레이하는 백그라운드 태스크
                         sess.oai_task = asyncio.create_task(relay_openai_to_client(sess, ws))
                         await ws.send_text(jdumps({"type": "scriptsession.started"}))
                     else:
                         await ws.send_text(jdumps({"type": "warn", "message": "already started"}))
 
-                # 2) 오디오 append → OAI로 그대로 전달
+                # 2) 오디오 append → Open AI로 그대로 전달
                 elif t == "input_audio_buffer.append":
                     if not sess.oai_ws:
                         await ws.send_text(jdumps({"type": "error", "message": "session not started"}))
                         continue
+                    
                     # data = { type, audio (base64) }
                     ct = data.get("current_time")
                     if ct:
@@ -151,7 +153,7 @@ async def ws_endpoint(ws: WebSocket):
                 elif t == "session.close":
                     await ws.send_text(jdumps({
                         "type": "session.close",
-                        "payload": {"status": "closed"}
+                        "payload": {"status": "closed successfully"}
                     }))
                     break
 
@@ -160,13 +162,12 @@ async def ws_endpoint(ws: WebSocket):
                     pass
 
             elif msg.get("bytes") is not None:
-                lprint("network latency : ", time.time()*1000 - msg["bytes"])
-                # # 바이너리로도 보낼 수 있다면 여기서 OAI로 전달하는 변형 가능
-                # buf: bytes = msg["bytes"]
-                # await ws.send_text(jdumps({
-                #     "type": "binary_ack",
-                #     "payload": {"received_bytes": len(buf)}
-                # }))
+                # 바이너리로도 보낼 수 있다면 여기서 OAI로 전달하는 변형 가능
+                buf: bytes = msg["bytes"]
+                await ws.send_text(jdumps({
+                    "type": "binary_ack",
+                    "payload": {"received_bytes": len(buf)}
+                }))
 
     except WebSocketDisconnect:
         pass
@@ -232,11 +233,10 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 # 3-6) 문장 종료(<END>) 처리
                 if "<END>" in translated_text:
                     # 저장 시에는 <END> 제거해서 넣는 걸 권장
-                    def strip_end(s: str) -> str:
-                        return s.replace("<END>", "").strip()
+                    translated_text = translated_text.replace("<END>", "").strip()
 
-                    sess.transcripts.append(sess.current_transcript.strip())
-                    sess.translateds.append(strip_end(sess.current_translated))
+                    sess.transcripts.append(translated_text)
+                    sess.translateds.append(translated_text)
 
                     # 다음 문장 누적용 버퍼 비우기
                     sess.current_transcript = ""
@@ -261,14 +261,12 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
 
 async def teardown_session(sess: Session):
     sess.running = False
-    if sess.tts_task:
-        sess.tts_task.cancel()
-        with contextlib.suppress(Exception):
-            await sess.tts_task
-    if sess.oai_task:
-        sess.oai_task.cancel()
-        with contextlib.suppress(Exception):
-            await sess.oai_task
+    for t in (sess.tts_task, sess.oai_task, sess.sender_task):
+        if t:
+            t.cancel()
+            with contextlib.suppress(Exception):
+                await t
+    
     if sess.oai_ws:
         with contextlib.suppress(Exception):
             await sess.oai_ws.close()
@@ -307,7 +305,7 @@ async def run_translate_async(sess: Session) -> str:
             # sess.tts_in_q.put_nowait(chunk) # 마지막 청크
             chunks = chunk.split(" ")
             for i in range(0, len(chunks), 3):
-                if i+4 >= len(chunks):
+                if i >= len(chunks) - 4:
                     sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
                     break
                 else:
@@ -315,11 +313,11 @@ async def run_translate_async(sess: Session) -> str:
         except asyncio.QueueFull:
             dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
 
-    async def debounce_flush(delay_ms: int = 80):
+    async def debounce_flush(delay_ms: int = 110):
         try:
             await asyncio.sleep(delay_ms / 1000)
             flush_tts_chunk()
-        except asyncio.CancelledError as e:
+        except Exception as e:
             dprint("[debounce_flush] WARN: debounce_flush cancelled", e)
 
     def on_token(tok: str):
@@ -328,7 +326,7 @@ async def run_translate_async(sess: Session) -> str:
             sess.tts_buf.append(tok)
             if sess.tts_debounce_task and not sess.tts_debounce_task.done():
                 sess.tts_debounce_task.cancel()
-            sess.tts_debounce_task = asyncio.create_task(debounce_flush(80))
+            sess.tts_debounce_task = asyncio.create_task(debounce_flush(110))
         loop.call_soon_threadsafe(_append_and_schedule)
 
     def run_blocking():
