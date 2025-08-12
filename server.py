@@ -160,12 +160,13 @@ async def ws_endpoint(ws: WebSocket):
                     pass
 
             elif msg.get("bytes") is not None:
-                # 바이너리로도 보낼 수 있다면 여기서 OAI로 전달하는 변형 가능
-                buf: bytes = msg["bytes"]
-                await ws.send_text(jdumps({
-                    "type": "binary_ack",
-                    "payload": {"received_bytes": len(buf)}
-                }))
+                lprint("network latency : ", time.time()*1000 - msg["bytes"])
+                # # 바이너리로도 보낼 수 있다면 여기서 OAI로 전달하는 변형 가능
+                # buf: bytes = msg["bytes"]
+                # await ws.send_text(jdumps({
+                #     "type": "binary_ack",
+                #     "payload": {"received_bytes": len(buf)}
+                # }))
 
     except WebSocketDisconnect:
         pass
