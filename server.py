@@ -345,14 +345,14 @@ async def elevenlabs_streamer(
         output_format: str = "mp3_22050_32",
         keepalive_interval: int = 15
     ):
-    url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?output_format={output_format}"
+    url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input"
     headers = [("xi-api-key", api_key)]
     try:
-        async with websockets.connect(url, extra_headers=headers, max_size=None) as ws:
-            sess.tts_ws = ws
+        async with websockets.connect(url, extra_headers=headers, max_size=None) as elws:
+            sess.tts_ws = elws
             # settings 보낸 직후, 가벼운 텍스트 한 번(트리거는 False)
             try:
-                await ws.send(jdumps({
+                await elws.send(jdumps({
                     "text": " ",  # 워밍업 (공백)
                     "voice_settings": {"stability": 0.5, "similarity_boost": 0.8, "speed": 1.0},
                     "generation_config": { "chunk_length_schedule": [120,160,250,290] },
@@ -364,7 +364,7 @@ async def elevenlabs_streamer(
             async def recv_loop():
                 print("[elevenlabs_streamer] recv_loop START")
                 try:
-                    async for msg in ws:
+                    async for msg in elws:
                         print("[elevenlabs_streamer] recv_loop msg", msg)
                         # ElevenLabs는 text 프레임(JSON)로 응답
                         data = json.loads(msg)
@@ -396,7 +396,7 @@ async def elevenlabs_streamer(
                             continue
                     
                         print("[elevenlabs_streamer] send_loop →", repr(text_chunk))
-                        await ws.send(json.dumps({
+                        await elws.send(jdumps({
                             "text": text_chunk + ".",
                             "try_trigger_generation": True
                         }))
@@ -416,7 +416,7 @@ async def elevenlabs_streamer(
                         await asyncio.sleep(keepalive_interval)
                         # 공백 하나는 inactivity 연장에 안전
                         try:
-                            await ws.send(jdumps({
+                            await elws.send(jdumps({
                                 "text": " ",
                                 "try_trigger_generation": False
                             }))
@@ -446,12 +446,22 @@ async def elevenlabs_streamer(
                 with contextlib.suppress(Exception):
                     await t
             print(f"\n\nPrint for check End : {done} \n\n")
-            
+    except asyncio.CancelledError:
+        print("[elevenlabs_streamer] Main task cancelled.")
     except Exception as e:
-        await sess.out_q.put(jdumps({"type":"tts_error","message":str(e)}))
+        print(f"[elevenlabs_streamer] An unexpected error occurred: {e}")
+        await sess.out_q.put(jdumps({"type": "tts_error", "message": str(e)}))
     finally:
+        # ✅ CRITICAL FIX: Send the End-of-Stream (EOS) message before closing.
+        if sess.tts_ws and sess.tts_ws.open:
+            print("[elevenlabs_streamer] Sending End-of-Stream message.")
+            try:
+                await sess.tts_ws.send(jdumps({"text": ""}))
+            except Exception as e:
+                print(f"[elevenlabs_streamer] Failed to send EOS message: {e}")
+        
         sess.tts_ws = None
-
+        print("[elevenlabs_streamer] Connection closed and cleaned up.")
 
 # 필요 import
 import contextlib
