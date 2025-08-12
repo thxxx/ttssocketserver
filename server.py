@@ -131,9 +131,11 @@ async def ws_endpoint(ws: WebSocket):
                     ct = data.get("current_time")
                     if ct:
                         lprint("network latency : ", time.time()*1000 - ct)
+
+                    b64 = base64.b64encode(data.get("audio")).decode("ascii")
                     await sess.oai_ws.send(jdumps({
                         "type": "input_audio_buffer.append",
-                        "audio": data.get("audio")
+                        "audio": b64
                     }))
 
                 # 3) 커밋 신호 전달 (chunk 경계)
@@ -190,9 +192,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
 
             if etype.endswith(".delta"):
                 text = evt.get("delta") or evt.get("text") or evt.get("content") or ""
-                st = time.time()
-                await sess.out_q.put(jdumps({"type": "delta", "text": text}))
-                lprint("delta sending time : ", time.time() - st)
+                await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
             elif etype.endswith(".completed"):
                 # 3-1) 최종 전사 수신
                 final_text = (evt.get("transcript") or evt.get("content") or "").strip()
