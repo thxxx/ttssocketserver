@@ -287,7 +287,7 @@ async def run_translate_async(sess: Session) -> str:
         chunk = "".join(sess.tts_buf).strip()
         chunk = re.sub(r"<[^>]*>", "", chunk)
 
-        print("[flush_tts_chunk] chunk:", repr(chunk))
+        print("[flush_tts_chunk] ", repr(chunk))
         sess.tts_buf.clear()
         try:
             sess.tts_in_q.put_nowait(chunk)
@@ -365,6 +365,7 @@ async def elevenlabs_streamer(
                 print("[elevenlabs_streamer] recv_loop START")
                 try:
                     async for msg in ws:
+                        print("[elevenlabs_streamer] recv_loop msg", msg)
                         # ElevenLabs는 text 프레임(JSON)로 응답
                         data = json.loads(msg)
                         # 오디오 청크
