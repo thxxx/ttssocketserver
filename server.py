@@ -128,9 +128,6 @@ async def ws_endpoint(ws: WebSocket):
                     if not sess.oai_ws:
                         await ws.send_text(jdumps({"type": "error", "message": "session not started"}))
                         continue
-                    ct = data.get("current_time")
-                    if ct:
-                        lprint("IA - network latency : ", time.time()*1000 - ct)
                     
                     if data.get("audio") and 'data' in data.get("audio"):
                         b64 = base64.b64encode(bytes(data.get("audio")['data'])).decode('ascii')
@@ -404,7 +401,6 @@ async def elevenlabs_streamer(
                                 "format": output_format,
                                 "audio": data["audio"],
                                 "isFinal": data.get("isFinal", False),
-                                "current_time": time.time() * 1000, # ms 단위
                             }))
                         else:
                             dprint("[elevenlabs_streamer] recv_loop msg", msg)
