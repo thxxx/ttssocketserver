@@ -350,15 +350,14 @@ async def elevenlabs_streamer(
     try:
         async with websockets.connect(url, extra_headers=headers, max_size=None) as ws:
             sess.tts_ws = ws
-            # 초기 설정 전송 (옵션)
-            await ws.send(jdumps({
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.8, "speed": 1.0},
-            }))
-            print("elevenlabs first setting done")
-
             # settings 보낸 직후, 가벼운 텍스트 한 번(트리거는 False)
             try:
-                await ws.send(jdumps({"text": " ", "try_trigger_generation": False}))
+                await ws.send(jdumps({
+                    "text": " ",  # 워밍업 (공백)
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.8, "speed": 1.0},
+                    "generation_config": { "chunk_length_schedule": [120,160,250,290] },
+                    "xi_api_key": api_key  # 헤더 + 바디 둘 다 주면 가장 호환성 좋음
+                }))
             except Exception as e:
                 print("[elevenlabs_streamer] initial warmup send error:", e)
 
