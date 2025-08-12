@@ -131,12 +131,12 @@ async def ws_endpoint(ws: WebSocket):
                     ct = data.get("current_time")
                     if ct:
                         lprint("IA - network latency : ", time.time()*1000 - ct)
-                    print("DAA - ", data.get("audio"))
-                    b64 = base64.b64encode(data.get("audio")).decode('ascii')
-                    await sess.oai_ws.send(jdumps({
-                        "type": "input_audio_buffer.append",
-                        "audio": b64
-                    }))
+                    if data.get("audio") and 'data' in data.get("audio"):
+                        b64 = base64.b64encode(data.get("audio")['data']).decode('ascii')
+                        await sess.oai_ws.send(jdumps({
+                            "type": "input_audio_buffer.append",
+                            "audio": b64
+                        }))
 
                 # 3) 커밋 신호 전달 (chunk 경계)
                 elif t == "input_audio_buffer.commit":
