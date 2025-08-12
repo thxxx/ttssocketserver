@@ -342,7 +342,8 @@ async def elevenlabs_streamer(
         sess: Session, 
         voice_id: str, 
         api_key: str,
-        output_format: str = "mp3_22050_32"
+        output_format: str = "mp3_22050_32",
+        keepalive_interval: int = 15
     ):
     url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?output_format={output_format}"
     headers = [("xi-api-key", api_key)]
