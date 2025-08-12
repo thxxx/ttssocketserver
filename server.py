@@ -10,6 +10,7 @@ import orjson as json  # loads/dumps 호환 아님
 import os
 import websockets
 import base64
+import re
 
 def jdumps(o): return json.dumps(o).decode()  # bytes -> str
 
@@ -279,16 +280,18 @@ async def run_translate_async(sess: Session) -> str:
     """
     loop = asyncio.get_running_loop()
 
-
     def flush_tts_chunk():
-        print("flush_tts_chunk", sess.tts_buf)
         if not sess.tts_buf or len(sess.tts_buf) == 0:
             return
         chunk = "".join(sess.tts_buf).strip()
+        chunk = re.sub(r"<[^>]*>", "", chunk)
         print("chunk : ", chunk)
         sess.tts_buf.clear()
         # 스레드→루프 안전하게 큐에 push
-        loop.call_soon_threadsafe(sess.tts_in_q.put_nowait, chunk)
+        try:
+            sess.tts_in_q.put_nowait(chunk)  # ← 바로 넣기
+        except asyncio.QueueFull:
+            print("[flush_tts_chunk] tts_in_q full, dropping chunk")
 
     async def debounce_flush(delay_ms: int = 80):
         try:
@@ -356,6 +359,12 @@ async def elevenlabs_streamer(
             }))
             print("elevenlabs first setting done")
 
+            # settings 보낸 직후, 가벼운 텍스트 한 번(트리거는 False)
+            await ws.send(jdumps({
+                "text": " ",  # 공백 하나라도 OK
+                "try_trigger_generation": False
+            }))
+
             # 수신 루프와 송신 루프를 동시에 돌리기
             async def recv_loop():
                 try:
@@ -381,6 +390,7 @@ async def elevenlabs_streamer(
                     print("elevenlabs_streamer recv_loop error", e)
 
             async def send_loop():
+                print("[elevenlabs_streamer] send_loop START")
                 try:
                     while sess.running:
                         text_chunk = await sess.tts_in_q.get()
@@ -395,18 +405,25 @@ async def elevenlabs_streamer(
                                 "try_trigger_generation": True
                             }))
                 except Exception as e:
-                    print("elevenlabs_streamer send_loop error", e)
+                    print("[elevenlabs_streamer] send_loop error", e)
+                finally:
+                    print("[elevenlabs_streamer] send_loop END")
             
             recv_task = asyncio.create_task(recv_loop())
             send_task = asyncio.create_task(send_loop())
             
-            # ✅ 수신 루프 기준으로 종료를 제어
-            await recv_task
-            # 수신이 끝났다면 송신 태스크를 정리
-            if not send_task.done():
-                send_task.cancel()
+            # 제안:
+            done, pending = await asyncio.wait(
+                {recv_task, send_task},
+                return_when=asyncio.FIRST_EXCEPTION
+            )
+            
+            print("\n\nPrint for check End \n\n")
+            # 남은 태스크 정리
+            for t in pending:
+                t.cancel()
                 with contextlib.suppress(Exception):
-                    await send_task
+                    await t
             
     except Exception as e:
         await sess.out_q.put(jdumps({"type":"tts_error","message":str(e)}))
