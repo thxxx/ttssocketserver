@@ -394,12 +394,15 @@ async def elevenlabs_streamer(
 
                         if not (text_chunk and text_chunk.strip()):
                             continue
-                        payload = {
-                            "text": text_chunk,
-                            "try_trigger_generation": True
-                        }
+                    
                         print("[elevenlabs_streamer] send_loop →", repr(text_chunk))
-                        await ws.send(jdumps(payload))
+                        await ws.send(json.dumps({
+                            "text": text_chunk + ".",
+                            "try_trigger_generation": True
+                        }))
+                        await ws.send(json.dumps({
+                            "text": ""
+                        }))
                 except asyncio.CancelledError:
                     print("[elevenlabs_streamer] send_loop CANCELLED")
                     raise
