@@ -304,8 +304,9 @@ async def run_translate_async(sess: Session) -> str:
         try:
             chunks = chunk.split(" ")
             for i in range(0, len(chunks), 3):
-                if i+3 >= len(chunks):
+                if i+5 >= len(chunks):
                     sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
+                    break
                 else:
                     sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3])) # 3개씩 끊어서 보내기
         except asyncio.QueueFull:
@@ -360,7 +361,7 @@ async def elevenlabs_streamer(
         voice_id: str, 
         api_key: str,
         output_format: str = "mp3_22050_32",
-        keepalive_interval: int = 18
+        keepalive_interval: int = 58
     ):
     url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_flash_v2_5&output_format={output_format}"
     headers = [("xi-api-key", api_key)]
