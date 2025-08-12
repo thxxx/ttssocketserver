@@ -20,7 +20,7 @@ ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 
 app = FastAPI()
 
-DEBUG = False
+DEBUG = True
 def dprint(*a, **k): 
     if DEBUG: print(*a, **k)
 
