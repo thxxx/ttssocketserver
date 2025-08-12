@@ -400,9 +400,6 @@ async def elevenlabs_streamer(
                             "text": text_chunk + ".",
                             "try_trigger_generation": True
                         }))
-                        await ws.send(json.dumps({
-                            "text": ""
-                        }))
                 except asyncio.CancelledError:
                     print("[elevenlabs_streamer] send_loop CANCELLED")
                     raise
