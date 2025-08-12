@@ -144,13 +144,10 @@ async def ws_endpoint(ws: WebSocket):
                         continue
                     await sess.oai_ws.send(jdumps({"type": "input_audio_buffer.commit"}))
 
-                elif t == "text":
-                    txt = data["payload"]["text"]
-                    await ws.send_text(jdumps({
-                        "type": "echo",
-                        "payload": {"text": f"server echo: {txt}"}
-                    }))
-
+                elif t == "test":
+                    ct = data.get("current_time")
+                    if ct:
+                        lprint("network latency : ", time.time()*1000 - ct)
                 elif t == "session.close":
                     await ws.send_text(jdumps({
                         "type": "session.close",
