@@ -302,15 +302,15 @@ async def run_translate_async(sess: Session) -> str:
         dprint("[flush_tts_chunk] ", repr(chunk))
         sess.tts_buf.clear()
         try:
-            sess.tts_in_q.put_nowait(chunk) # 마지막 청크
+            # sess.tts_in_q.put_nowait(chunk) # 마지막 청크
 
-            # chunks = chunk.split(" ")
-            # for i in range(0, len(chunks), 3):
-            #     if i+4 >= len(chunks):
-            #         sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
-            #         break
-            #     else:
-            #         sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3])) # 기본적으로는 3개씩 끊어서 보내기
+            chunks = chunk.split(" ")
+            for i in range(0, len(chunks), 3):
+                if i+4 >= len(chunks):
+                    sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
+                    break
+                else:
+                    sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3])) # 기본적으로는 3개씩 끊어서 보내기
         except asyncio.QueueFull:
             dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
 
