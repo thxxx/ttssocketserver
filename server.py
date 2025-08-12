@@ -302,7 +302,12 @@ async def run_translate_async(sess: Session) -> str:
         dprint("[flush_tts_chunk] ", repr(chunk))
         sess.tts_buf.clear()
         try:
-            sess.tts_in_q.put_nowait(chunk)
+            chunks = chunk.split(" ")
+            for i in range(0, len(chunks), 3):
+                if i+3 >= len(chunks):
+                    sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
+                else:
+                    sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3])) # 3개씩 끊어서 보내기
         except asyncio.QueueFull:
             dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
 
@@ -383,7 +388,7 @@ async def elevenlabs_streamer(
                         lprint("tts time : ", sess.end_tts_time - sess.end_translation_time)
 
                         # 오디오 청크
-                        if "audio" in data:
+                        if "audio" in data and data['audio'] is not None:
                             dprint("[elevenlabs_streamer] Is Final? : ", len(data['audio']), data["isFinal"])
                             await sess.out_q.put(jdumps({
                                 "type": "tts_audio",
@@ -412,10 +417,10 @@ async def elevenlabs_streamer(
                     
                         dprint("[elevenlabs_streamer] send_loop →", repr(text_chunk))
                         await elws.send(jdumps({
-                            "text": text_chunk,
+                            "text": text_chunk + " ",
                             "try_trigger_generation": True
                         }))
-                        await elws.send(jdumps({"text": ""}))
+                        # await elws.send(jdumps({"text": ""}))
                 except asyncio.CancelledError:
                     dprint("[elevenlabs_streamer] send_loop CANCELLED")
                     raise
