@@ -131,8 +131,9 @@ async def ws_endpoint(ws: WebSocket):
                     ct = data.get("current_time")
                     if ct:
                         lprint("IA - network latency : ", time.time()*1000 - ct)
+                    
                     if data.get("audio") and 'data' in data.get("audio"):
-                        b64 = base64.b64encode(data.get("audio")['data']).decode('ascii')
+                        b64 = base64.b64encode(bytes(data.get("audio")['data'])).decode('ascii')
                         await sess.oai_ws.send(jdumps({
                             "type": "input_audio_buffer.append",
                             "audio": b64
