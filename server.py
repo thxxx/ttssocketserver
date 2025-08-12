@@ -128,15 +128,14 @@ async def ws_endpoint(ws: WebSocket):
                     if not sess.oai_ws:
                         await ws.send_text(jdumps({"type": "error", "message": "session not started"}))
                         continue
-                    
-                    # data = { type, audio (base64) }
                     ct = data.get("current_time")
                     if ct:
-                        lprint("network latency : ", time.time()*1000 - ct)
-
+                        lprint("IA - network latency : ", time.time()*1000 - ct)
+                        
+                    b64 = base64.b64encode(data.get("audio")).decode('ascii')
                     await sess.oai_ws.send(jdumps({
                         "type": "input_audio_buffer.append",
-                        "audio": data.get("audio")
+                        "audio": b64
                     }))
 
                 # 3) 커밋 신호 전달 (chunk 경계)
