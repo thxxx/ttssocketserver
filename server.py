@@ -283,31 +283,28 @@ async def run_translate_async(sess: Session) -> str:
     def flush_tts_chunk():
         if not sess.tts_buf or len(sess.tts_buf) == 0:
             return
+        
         chunk = "".join(sess.tts_buf).strip()
         chunk = re.sub(r"<[^>]*>", "", chunk)
-        print("chunk : ", chunk)
+
+        print("[flush_tts_chunk] chunk:", repr(chunk))
         sess.tts_buf.clear()
-        # 스레드→루프 안전하게 큐에 push
         try:
-            sess.tts_in_q.put_nowait(chunk)  # ← 바로 넣기
+            sess.tts_in_q.put_nowait(chunk)
         except asyncio.QueueFull:
-            print("[flush_tts_chunk] tts_in_q full, dropping chunk")
+            print("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
 
     async def debounce_flush(delay_ms: int = 80):
         try:
             await asyncio.sleep(delay_ms / 1000)
             flush_tts_chunk()
-        except asyncio.CancelledError:
-            pass
+        except asyncio.CancelledError as e:
+            print("[debounce_flush] WARN: debounce_flush cancelled", e)
 
-    # 콜백: 스레드에서 실행됨. 이벤트 루프에 안전하게 put 예약
     def on_token(tok: str):
-        # 콜백은 타 스레드에서 불릴 수 있으므로,
-        # 모든 상태 변경을 루프 스레드에서 수행하도록 래핑
+        # 다른 스레드에서 불릴 수 있으므로 루프 스레드로 래핑
         def _append_and_schedule():
-            # 여기부터는 이벤트 루프 스레드
             sess.tts_buf.append(tok)
-            # 기존 디바운스 태스크 취소도 루프 스레드에서만!
             if sess.tts_debounce_task and not sess.tts_debounce_task.done():
                 sess.tts_debounce_task.cancel()
             sess.tts_debounce_task = asyncio.create_task(debounce_flush(80))
@@ -327,15 +324,14 @@ async def run_translate_async(sess: Session) -> str:
     final_text = await loop.run_in_executor(None, run_blocking)
     print("final_text : ", final_text)
 
-    # 번역 끝났으면 마지막 남은 조각 flush
     if sess.tts_debounce_task and not sess.tts_debounce_task.done():
         sess.tts_debounce_task.cancel()
-    
-    # 번역 종료 시, 남은 디바운스/버퍼 처리도 루프 스레드에서만
+
     def _final_flush():
         if sess.tts_debounce_task and not sess.tts_debounce_task.done():
             sess.tts_debounce_task.cancel()
         flush_tts_chunk()
+
     loop.call_soon_threadsafe(_final_flush)
 
     # 최종 결과 알림
@@ -360,70 +356,95 @@ async def elevenlabs_streamer(
             print("elevenlabs first setting done")
 
             # settings 보낸 직후, 가벼운 텍스트 한 번(트리거는 False)
-            await ws.send(jdumps({
-                "text": " ",  # 공백 하나라도 OK
-                "try_trigger_generation": False
-            }))
+            try:
+                await ws.send(jdumps({"text": " ", "try_trigger_generation": False}))
+            except Exception as e:
+                print("[elevenlabs_streamer] initial warmup send error:", e)
 
-            # 수신 루프와 송신 루프를 동시에 돌리기
             async def recv_loop():
+                print("[elevenlabs_streamer] recv_loop START")
                 try:
                     async for msg in ws:
-                        print("elevenlabs_streamer recv_loop msg", msg)
+                        # ElevenLabs는 text 프레임(JSON)로 응답
                         data = json.loads(msg)
-
-                        # 오디오 청크 수신
+                        # 오디오 청크
                         if "audio" in data:
-                            # 그대로 클라로 전달 (클라에서 base64 디코드하여 재생)
                             await sess.out_q.put(jdumps({
                                 "type": "tts_audio",
                                 "format": output_format,
                                 "audio": data["audio"],
                                 "isFinal": data.get("isFinal", False),
                             }))
-                        
-                        # 기타 메타/에러
+                        # 경고/오류
                         if "warning" in data or "error" in data:
                             await sess.out_q.put(jdumps({"type":"tts_info","payload":data}))
-                        
                 except Exception as e:
-                    print("elevenlabs_streamer recv_loop error", e)
+                    print("[elevenlabs_streamer] recv_loop error:", e)
+                    raise
+                finally:
+                    print("[elevenlabs_streamer] recv_loop END")
 
             async def send_loop():
                 print("[elevenlabs_streamer] send_loop START")
                 try:
                     while sess.running:
+                        print("[elevenlabs_streamer] send_loop waiting for text_chunk", text_chunk)
                         text_chunk = await sess.tts_in_q.get()
-                        print("send_loop text_chunk", text_chunk)
-                        if not text_chunk:
-                            # 입력 종료 신호로 사용할 수도 있음
-                            # await ws.send(jdumps({"text": ""}))
+                        
+                        if not (text_chunk and text_chunk.strip()):
                             continue
-                        else:
-                            await ws.send(jdumps({
-                                "text": text_chunk,
-                                "try_trigger_generation": True
-                            }))
+                        payload = {
+                            "text": text_chunk,
+                            "try_trigger_generation": True
+                        }
+                        print("[elevenlabs_streamer] send_loop →", repr(text_chunk))
+                        await ws.send(jdumps(payload))
+                except asyncio.CancelledError:
+                    print("[elevenlabs_streamer] send_loop CANCELLED")
+                    raise
                 except Exception as e:
-                    print("[elevenlabs_streamer] send_loop error", e)
+                    print("[elevenlabs_streamer] send_loop error:", e)
+                    raise
                 finally:
                     print("[elevenlabs_streamer] send_loop END")
-            
+
+            async def keepalive_loop():
+                print("[elevenlabs_streamer] keepalive_loop START")
+                try:
+                    while sess.running:
+                        await asyncio.sleep(keepalive_interval)
+                        # 공백 하나는 inactivity 연장에 안전
+                        try:
+                            await ws.send(jdumps({
+                                "text": " ",
+                                "try_trigger_generation": False
+                            }))
+                            print("[elevenlabs_streamer] keepalive sent")
+                        except Exception as e:
+                            print("[elevenlabs_streamer] keepalive error:", e)
+                            raise
+                except asyncio.CancelledError:
+                    print("[elevenlabs_streamer] keepalive_loop CANCELLED")
+                    raise
+                finally:
+                    print("[elevenlabs_streamer] keepalive_loop END")
+
             recv_task = asyncio.create_task(recv_loop())
             send_task = asyncio.create_task(send_loop())
-            
-            # 제안:
+            ka_task   = asyncio.create_task(keepalive_loop())
+
+            # 셋 중 하나라도 예외로 끝나면 나머지도 정리
             done, pending = await asyncio.wait(
-                {recv_task, send_task},
+                {recv_task, send_task, ka_task},
                 return_when=asyncio.FIRST_EXCEPTION
             )
-            
-            print("\n\nPrint for check End \n\n")
-            # 남은 태스크 정리
+
+            # 남은 태스크 취소
             for t in pending:
                 t.cancel()
                 with contextlib.suppress(Exception):
                     await t
+            print(f"\n\nPrint for check End : {done} \n\n")
             
     except Exception as e:
         await sess.out_q.put(jdumps({"type":"tts_error","message":str(e)}))
