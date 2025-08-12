@@ -132,7 +132,7 @@ async def ws_endpoint(ws: WebSocket):
                     if ct:
                         lprint("IA - network latency : ", time.time()*1000 - ct)
                         
-                    b64 = base64.b64encode(data.get("audio")).decode('ascii')
+                    b64 = await base64.b64encode(data.get("audio")).decode('ascii')
                     await sess.oai_ws.send(jdumps({
                         "type": "input_audio_buffer.append",
                         "audio": b64
@@ -260,18 +260,25 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
 
 async def teardown_session(sess: Session):
     sess.running = False
-    for t in (sess.tts_task, sess.oai_task, sess.sender_task):
-        if t:
+
+    tasks = [sess.tts_task, sess.oai_task, sess.sender_task]
+    # 1) 모두 취소
+    for t in tasks:
+        if t and not t.done():
             t.cancel()
-            with contextlib.suppress(Exception):
+    for t in tasks:
+        if t:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await t
-    
     if sess.oai_ws:
         with contextlib.suppress(Exception):
             await sess.oai_ws.close()
     if sess.tts_ws:
         with contextlib.suppress(Exception):
-            await sess.tts_ws.close()
+            if sess.tts_ws.open:
+                await sess.tts_ws.send(jdumps({"text": ""}))  # EOS
+            await sess.tts_ws.wait_closed()
+        sess.tts_ws = None
 
 async def outbound_sender(sess: Session, client_ws: WebSocket):
     try:
