@@ -365,7 +365,7 @@ async def elevenlabs_streamer(
         output_format: str = "mp3_22050_32",
         keepalive_interval: int = 18
     ):
-    url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_flash_v2_5&output_format={output_format}"
+    url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_flash_v2_5&output_format={output_format}&auto_mode=true"
     headers = [("xi-api-key", api_key)]
     try:
         async with websockets.connect(url, extra_headers=headers, max_size=None) as elws:
@@ -420,7 +420,7 @@ async def elevenlabs_streamer(
                     
                         dprint("[elevenlabs_streamer] send_loop →", repr(text_chunk))
                         await elws.send(jdumps({
-                            "text": text_chunk + ".",
+                            "text": text_chunk,
                             "try_trigger_generation": True
                         }))
                         # await elws.send(jdumps({"text": ""}))
