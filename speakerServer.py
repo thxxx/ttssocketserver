@@ -16,7 +16,6 @@ import time
 def jdumps(o): return json.dumps(o).decode()  # bytes -> str
 
 VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "wj5ree7FcgKDPFphpPWQ")
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 
 app = FastAPI()
 
@@ -64,8 +63,7 @@ class Session:
         self.llm_cached_token_count = 0
         self.llm_input_token_count = 0
         self.llm_output_token_count = 0
-        self.tts_output_token_count = 0
-        
+        self.stt_output_token_count = 0
 
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
 
@@ -88,17 +86,6 @@ async def ws_endpoint(ws: WebSocket):
                     continue
 
                 t = data.get("type")
-
-
-                # (A) 핑-퐁: 시계 오프셋 추정용
-                if t == "latency.ping":
-                    t1 = int(time.time() * 1000)   # server recv
-                    t2 = int(time.time() * 1000)   # server send (즉시)
-                    await ws.send_text(json.dumps({
-                        "type": "latency.pong",
-                        "t0": data["t0"], "t1": t1, "t2": t2
-                    }))
-                    continue
 
                 # 1) 세션 시작: OpenAI Realtime WS 연결
                 if t == "scriptsession.start":
@@ -128,16 +115,6 @@ async def ws_endpoint(ws: WebSocket):
                         # 연결 직후 OpenAI 세션에 초기 메시지 전송 for setting up session
                         await sess.oai_ws.send(jdumps(initMsg))
 
-                        # --- ElevenLabs TTS 스트리머 시작 ---
-                        sess.tts_task = asyncio.create_task(
-                            elevenlabs_streamer(
-                                sess,
-                                voice_id=VOICE_ID,
-                                api_key=ELEVENLABS_API_KEY,
-                                output_format="mp3_22050_32"
-                            )
-                        )
-
                         # OpenAI 이벤트를 client로 릴레이하는 백그라운드 태스크
                         sess.oai_task = asyncio.create_task(relay_openai_to_client(sess, ws))
                         await ws.send_text(jdumps({"type": "scriptsession.started"}))
@@ -149,15 +126,6 @@ async def ws_endpoint(ws: WebSocket):
                     if not sess.oai_ws:
                         await ws.send_text(jdumps({"type": "error", "message": "session not started"}))
                         continue
-                    
-                    t1 = int(time.time() * 1000)   # server recv
-                    t0 = data.get("t0")  # client send(ms)
-                    
-                    await ws.send_text(json.dumps({
-                        "type": "audio.recv.ack",
-                        "t0": t0,
-                        "t1": t1
-                    }))
                     
                     # 현재는 base64가 아닌 PCM이 온다.
                     if data.get("audio") and 'data' in data.get("audio"):
@@ -174,10 +142,7 @@ async def ws_endpoint(ws: WebSocket):
                         continue
                     await sess.oai_ws.send(jdumps({"type": "input_audio_buffer.commit"}))
 
-                elif t == "test":
-                    ct = data.get("current_time")
-                    if ct:
-                        lprint("network latency : ", time.time()*1000 - ct)
+                # 4) 세션 종료
                 elif t == "session.close":
                     await ws.send_text(jdumps({
                         "type": "session.close",
@@ -186,7 +151,7 @@ async def ws_endpoint(ws: WebSocket):
                         "llm_cached_token_count": sess.llm_cached_token_count,
                         "llm_input_token_count": sess.llm_input_token_count,
                         "llm_output_token_count": sess.llm_output_token_count,
-                        "tts_output_token_count": sess.tts_output_token_count,
+                        "stt_output_token_count": sess.stt_output_token_count,
                     }))
                     break
 
@@ -401,135 +366,6 @@ async def run_translate_async(sess: Session) -> str:
     # 최종 결과 알림
     await sess.out_q.put(jdumps({"type": "translated", "text": final_text}))
     return final_text
-
-async def elevenlabs_streamer(
-        sess: Session, 
-        voice_id: str, 
-        api_key: str,
-        output_format: str = "mp3_22050_32",
-        keepalive_interval: int = 18
-    ):
-    url = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_flash_v2_5&output_format={output_format}&auto_mode=true"
-    headers = [("xi-api-key", api_key)]
-    try:
-        async with websockets.connect(url, extra_headers=headers, max_size=None) as elws:
-            sess.tts_ws = elws
-            # settings 보낸 직후, 가벼운 텍스트 한 번(트리거는 False)
-            try:
-                await elws.send(jdumps({
-                    "text": " ",  # 워밍업 (공백)
-                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.8, "speed": 1.0},
-                    "generation_config": { "chunk_length_schedule": [120,160,250,290] },
-                    "xi_api_key": api_key  # 헤더 + 바디 둘 다 주면 가장 호환성 좋음
-                }))
-            except Exception as e:
-                dprint("[elevenlabs_streamer] initial warmup send error:", e)
-
-            async def recv_loop():
-                dprint("[elevenlabs_streamer] recv_loop START")
-                try:
-                    async for msg in elws:
-                        # ElevenLabs는 text 프레임(JSON)로 응답
-                        data = json.loads(msg)
-                        sess.end_tts_time = time.time()
-
-                        # 오디오 청크
-                        if "audio" in data and data['audio'] is not None:
-                            dprint("[elevenlabs_streamer] Is Final? : ", len(data['audio']), data["isFinal"])
-                            lprint("tts time : ", time.time() - sess.end_translation_time)
-                            await sess.out_q.put(jdumps({
-                                "type": "tts_audio",
-                                "format": output_format,
-                                "audio": data["audio"],
-                                "isFinal": data.get("isFinal", False),
-                            }))
-                        else:
-                            dprint("[elevenlabs_streamer] recv_loop msg", msg)
-                        # 경고/오류
-                        if "warning" in data or "error" in data:
-                            await sess.out_q.put(jdumps({"type":"tts_info","payload":data}))
-                except Exception as e:
-                    dprint("[elevenlabs_streamer] recv_loop error:", e)
-                    raise
-                finally:
-                    dprint("[elevenlabs_streamer] recv_loop END")
-
-            async def send_loop():
-                dprint("[elevenlabs_streamer] send_loop START")
-                try:
-                    while sess.running:
-                        text_chunk = await sess.tts_in_q.get()
-                        if not (text_chunk and text_chunk.strip()):
-                            continue
-                    
-                        dprint("[elevenlabs_streamer] send_loop →", repr(text_chunk))
-                        await elws.send(jdumps({
-                            "text": text_chunk,
-                            "try_trigger_generation": True
-                        }))
-                        # await elws.send(jdumps({"text": ""}))
-                except asyncio.CancelledError:
-                    dprint("[elevenlabs_streamer] send_loop CANCELLED")
-                    raise
-                except Exception as e:
-                    dprint("[elevenlabs_streamer] send_loop error:", e)
-                    raise
-                finally:
-                    dprint("[elevenlabs_streamer] send_loop END")
-
-            async def keepalive_loop():
-                dprint("[elevenlabs_streamer] keepalive_loop START")
-                try:
-                    while sess.running:
-                        await asyncio.sleep(keepalive_interval)
-                        # 공백 하나는 inactivity 연장에 안전
-                        try:
-                            await elws.send(jdumps({
-                                "text": " ",
-                                "try_trigger_generation": False
-                            }))
-                            dprint("[elevenlabs_streamer] keepalive sent")
-                        except Exception as e:
-                            dprint("[elevenlabs_streamer] keepalive error:", e)
-                            raise
-                except asyncio.CancelledError:
-                    dprint("[elevenlabs_streamer] keepalive_loop CANCELLED")
-                    raise
-                finally:
-                    dprint("[elevenlabs_streamer] keepalive_loop END")
-
-            recv_task = asyncio.create_task(recv_loop())
-            send_task = asyncio.create_task(send_loop())
-            ka_task   = asyncio.create_task(keepalive_loop())
-
-            # 셋 중 하나라도 예외로 끝나면 나머지도 정리
-            done, pending = await asyncio.wait(
-                {recv_task, send_task, ka_task},
-                return_when=asyncio.FIRST_EXCEPTION
-            )
-
-            # 남은 태스크 취소
-            for t in pending:
-                t.cancel()
-                with contextlib.suppress(Exception):
-                    await t
-            dprint(f"\n\nPrint for check End : {done} \n\n")
-    except asyncio.CancelledError:
-        dprint("[elevenlabs_streamer] Main task cancelled.")
-    except Exception as e:
-        dprint(f"[elevenlabs_streamer] An unexpected error occurred: {e}")
-        await sess.out_q.put(jdumps({"type": "tts_error", "message": str(e)}))
-    finally:
-        # ✅ CRITICAL FIX: Send the End-of-Stream (EOS) message before closing.
-        if sess.tts_ws and sess.tts_ws.open:
-            dprint("[elevenlabs_streamer] Sending End-of-Stream message.")
-            try:
-                await sess.tts_ws.send(jdumps({"text": ""}))
-            except Exception as e:
-                dprint(f"[elevenlabs_streamer] Failed to send EOS message: {e}")
-        
-        sess.tts_ws = None
-        dprint("[elevenlabs_streamer] Connection closed and cleaned up.")
 
 # 필요 import
 import contextlib
