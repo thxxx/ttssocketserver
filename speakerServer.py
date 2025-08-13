@@ -269,6 +269,7 @@ async def run_translate_async(sess: Session) -> str:
     loop = asyncio.get_running_loop()
 
     def on_token(tok: str):
+        print("on_token : ", tok)
         # 굳이 여기서 할게 있나?
         pass
 
