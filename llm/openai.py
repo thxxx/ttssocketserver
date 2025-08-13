@@ -163,18 +163,28 @@ Only output the new translation. No explanations or additional text.
     )
 
     sent = ''
+
+    pt = 0
+    pt_cached = 0
+    ct = 0
+
     for chunk in response:
         if chunk.usage and chunk.usage is not None:
             u = chunk.usage;
-            u.prompt_tokens
-            u.prompt_tokens_details.cached_tokens
-            u.completion_tokens
+            pt += u.prompt_tokens
+            pt_cached += u.prompt_tokens_details.cached_tokens
+            ct += u.completion_tokens
         else:
             if chunk.choices[0].delta.content != '' and chunk.choices[0].delta.content is not None:
                 onToken(chunk.choices[0].delta.content)
                 sent += chunk.choices[0].delta.content
 
-    return sent
+    return {
+        "text": sent,
+        "prompt_tokens": pt,
+        "prompt_tokens_cached": pt_cached,
+        "completion_tokens": ct,
+    }
 
 
 

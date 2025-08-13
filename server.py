@@ -362,6 +362,7 @@ async def run_translate_async(sess: Session) -> str:
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
     output = await loop.run_in_executor(None, run_blocking)
+    dprint("llm output : ", output)
     final_text = output["text"]
     dprint("final_text : ", final_text)
     sess.llm_cached_token_count += output["prompt_tokens_cached"]
