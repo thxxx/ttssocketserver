@@ -235,6 +235,7 @@ You must output "<SKIP>" if ANY of the following is true:
 
 When in doubt, ALWAYS choose "<SKIP>" rather than guessing the next part of the sentence.
 
+<prevScripts>를 보고 이전에 어떤 식의 얘기를 하고있었는지를 파악하고 현재 문장이 어떻게 번역되어야 자연스러운지를 반영해서 한글로 번역해줘.
 
 # EXAMPLES:
 <current_scripted_sentence>: I have a meeting scheduled this afternoon, so before that I need to organize the materials

@@ -182,7 +182,8 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 else:
                     sess.current_transcript = final_text
                 
-                if len(sess.current_transcript) < 3:
+                # 너무 짧은 문장이나 단어는 굳이 바로 번역하지 않기.
+                if len(sess.current_transcript) < 6:
                     continue
                 
                 dprint("\nprevScripts", sess.transcripts[-5:])
@@ -199,7 +200,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                     continue
 
                 # 3-5) 누적 번역 업데이트 (공백 관리)
-                if sess.current_translated:
+                if sess.current_translated and "<CORRECTED>" not in translated_text:
                     sess.current_translated += " " + translated_text
                 else:
                     sess.current_translated = translated_text
