@@ -160,6 +160,7 @@ Only output the new translation. No explanations or additional text.
         user="k2e-translator-v1-hojinkhj6051230808",
         prompt_cache_key="k2e-translator-v1-hojinkhj6051230808",
         stream=True,
+        stream_options={"include_usage": True},
     )
 
     sent = ''
