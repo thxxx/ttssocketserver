@@ -212,7 +212,6 @@ Translate only the NEW parts of <current_scripted_sentence> that haven't been co
 7. All information must be preserved — no loss or mistranslation allowed.
 8. If the combination of <translated_history> and your current output covers the full meaning of the English input, include <END> at the end of your output.
 9. <prevScripts> is the previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural. **Never translate the prevScripts**.
-10. Write all numbers in Korean words (e.g., 하나, 둘) instead of digits.
 11. In <current_scripted_sentence>, there may be words incorrectly transcribed due to pronunciation errors or noise. Translate as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
 12. Preserve the original meaning, tone, and nuance.
 13. Avoid overly literal translations — adapt expressions to sound natural in Korean.
