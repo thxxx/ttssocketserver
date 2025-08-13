@@ -12,6 +12,7 @@ import websockets
 import base64
 import re
 import time
+print("=== server.py loaded ===")
 
 def jdumps(o): return json.dumps(o).decode()  # bytes -> str
 
@@ -154,7 +155,7 @@ async def ws_endpoint(ws: WebSocket):
                         await ws.send_text(jdumps({"type": "error", "message": "session not started"}))
                         continue
                     
-                    if sess.is_network_logging
+                    if sess.is_network_logging:
                         t1 = int(time.time() * 1000)   # server recv
                         t0 = data.get("t0")  # client send(ms)
                         await ws.send_text(jdumps({

@@ -10,8 +10,8 @@ import orjson as json  # loads/dumps 호환 아님
 import os
 import websockets
 import base64
-import re
 import time
+print("=== speakerServer.py loaded ===")
 
 def jdumps(o): return json.dumps(o).decode()  # bytes -> str
 
