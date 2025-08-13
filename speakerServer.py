@@ -268,24 +268,16 @@ async def run_translate_async(sess: Session) -> str:
     """
     loop = asyncio.get_running_loop()
 
-    def on_token(tok: str):
-        dprint("on_token : ", tok)
-        # 굳이 여기서 할게 있나?
-        pass
-
     def run_blocking():
         # 동기 translate 호출
-        dprint("동기 translate 호출")
         return translate_speaker(
             prevScripts=sess.transcripts[-5:],
             current_scripted_sentence=sess.current_transcript,
             current_translated=sess.current_translated,
-            onToken=on_token,
         )
 
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
-    dprint("loop : ", loop)
     output = await loop.run_in_executor(None, run_blocking)
     final_text = output["text"]
     dprint("final_text : ", final_text)
