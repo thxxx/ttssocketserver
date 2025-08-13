@@ -188,4 +188,108 @@ Only output the new translation. No explanations or additional text.
     }
 
 
+def translate_speaker(prevScripts:str, current_scripted_sentence:str, current_translated:str):
+    response = client.chat.completions.create(
+        model='gpt-4.1-mini',  # 최신 경량 모델
+        messages=[
+            {"role": "system", "content": "You are a professional translator specializing in [English] → [Korean] translation. Your job is to incrementally translate Korean speech as it comes in."},
+            {"role": "user", "content": f"""
+# INPUT FORMAT:
+- <prevScripts>: Previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural, mitigating recognition errors. **Never translate the prevScripts**.
+- <current_scripted_sentence>: Current English sentence from speech recognition (may contain pronunciation errors)
+- <translated_history>: Parts of the current sentence that were already translated to Korean previously
+
+# YOUR TASK:
+Translate only the NEW parts of <current_scripted_sentence> that haven't been covered in <translated_history>. Output the translation incrementally as more English text becomes available.
+
+# RULES:
+1. Only translate the portion NOT already covered in <translated_history>.
+2. Translate as much as safely possible without waiting for the complete sentence.
+3. Use polite and formal Korean (존댓말).
+4. It's OK to output just 0-2 words at a time.
+5. **If translating now might cause errors when more English follows, just output <SKIP>**.
+6. Do NOT repeat any text from <translated_history> in your output.
+7. All information must be preserved — no loss or mistranslation allowed.
+8. If the combination of <translated_history> and your current output covers the full meaning of the English input, include <END> at the end of your output.
+9. <prevScripts> is the previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural. **Never translate the prevScripts**.
+10. Write all numbers in Korean words (e.g., 하나, 둘) instead of digits.
+11. In <current_scripted_sentence>, there may be words incorrectly transcribed due to pronunciation errors or noise. Translate as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
+12. Preserve the original meaning, tone, and nuance.
+13. Avoid overly literal translations — adapt expressions to sound natural in Korean.
+14. If a direct translation sounds awkward, rephrase it while keeping the intent.
+15. Output only the translation, without additional commentary.
+16. If you detect that <translated_history> contains an error or mistranslation compared to the meaning of the current <current_scripted_sentence>, you may output a short conversational correction in Korean before continuing, such as “아니,”, “정확히 말씀드리면,”, “아, 그게 아니라,” followed by the corrected translation. Keep the correction brief and continue immediately.
+17. When in doubt, always choose <SKIP> rather than guessing.
+18. NEVER translate based only on the current_scripted_sentence without considering that more words may follow.
+19. If, when looking at <current_scripted_sentence>, it seems likely that more of the sentence will follow (because it is being received in real-time), you must append "..." at the end of your output.
+
+# CRITICAL SKIP RULES:
+If, when looking at <current_scripted_sentence>, it seems likely that more of the sentence will follow (because it is being received in real-time), you must append "..." at the end of your output.
+
+You must output "<SKIP>" if ANY of the following is true:
+- The sentence might still continue with additional words that could change the meaning.
+- The main verb has not yet appeared in the English sentence, making the action unclear.
+- The subject is ambiguous and could be clarified later.
+- The sentence ends with a connective (e.g., "because", "so", "and", "but").
+- The object or complement is incomplete and might change the meaning.
+- You are not 100% certain that your translation will remain correct after the next few English words.
+
+When in doubt, ALWAYS choose "<SKIP>" rather than guessing the next part of the sentence.
+
+
+# EXAMPLES:
+<current_scripted_sentence>: I have a meeting scheduled this afternoon, so before that I need to organize the materials
+<translated_history>: 회의가 오늘 오후에 예정되어 있고,
+Output: 그 전에 자료를 정리해야 합니다.<END>
+
+<current_scripted_sentence>: The revised design draft will be sent over today, and I'll also share it with the dev team.
+<translated_history>: 수정된 디자인 시안은 오늘 중으로 전달드릴 예정이고,
+Output: 개발팀에도 공유하겠습니다.<END>
+
+<current_scripted_sentence>: I I
+<translated_history>:
+Output: ...
+
+<current_scripted_sentence>: Just want to make sure the queue is building up properly
+<translated_history>:
+Output: 큐가 제대로 쌓이고 있는지만이라도...
+
+
+-- INPUT --
+<prevScripts>: {prevScripts}
+<current_scripted_sentence> : {current_scripted_sentence}
+<translated_history> : {current_translated}
+"""}
+        ],
+        temperature=0.5,
+        user="k2e-translator-v1-hojinkhj6051230808-speaker",
+        prompt_cache_key="k2e-translator-v1-hojinkhj6051230808-speaker",
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+
+    sent = ''
+
+    pt = 0
+    pt_cached = 0
+    ct = 0
+
+    for chunk in response:
+        if chunk.usage and chunk.usage is not None:
+            u = chunk.usage;
+            pt += u.prompt_tokens
+            pt_cached += u.prompt_tokens_details.cached_tokens
+            ct += u.completion_tokens
+        else:
+            if chunk.choices[0].delta.content != '' and chunk.choices[0].delta.content is not None:
+                sent += chunk.choices[0].delta.content
+
+    return {
+        "text": sent,
+        "prompt_tokens": pt,
+        "prompt_tokens_cached": pt_cached,
+        "completion_tokens": ct,
+    }
+
+
 

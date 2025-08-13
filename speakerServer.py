@@ -15,8 +15,6 @@ import time
 
 def jdumps(o): return json.dumps(o).decode()  # bytes -> str
 
-VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "wj5ree7FcgKDPFphpPWQ")
-
 app = FastAPI()
 
 DEBUG = True
@@ -43,20 +41,10 @@ class Session:
         self.out_q: asyncio.Queue[str] = asyncio.Queue()
         self.sender_task: Optional[asyncio.Task] = None
 
-        # --- TTS용 필드, text buffer 단위 speech 생성 ---
-        self.tts_ws = None
-        self.tts_task: Optional[asyncio.Task] = None
-        self.tts_in_q: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
-
-        # onToken에서 단어/프레이즈 coalescing용
-        self.tts_buf: list[str] = []
-        self.tts_debounce_task: Optional[asyncio.Task] = None
-
         # variables for logging
         self.start_scripting_time = 0
         self.end_scripting_time = 0
         self.end_translation_time = 0
-        self.end_tts_time = 0
 
         # time logging
         self.connection_start_time = 0
@@ -67,7 +55,7 @@ class Session:
 
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
 
-@app.websocket("/ws")
+@app.websocket("/speakerws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     sess = Session()
@@ -107,7 +95,7 @@ async def ws_endpoint(ws: WebSocket):
                                     "type": 'server_vad',
                                     "threshold": 0.4,
                                     "prefix_padding_ms": 200,
-                                    "silence_duration_ms": 150,
+                                    "silence_duration_ms": 100,
                                 },
                                 "input_audio_noise_reduction": { "type": 'far_field' },
                             },
@@ -159,14 +147,6 @@ async def ws_endpoint(ws: WebSocket):
                     # 필요시 기타 타입 처리
                     pass
 
-            elif msg.get("bytes") is not None:
-                # 바이너리로도 보낼 수 있다면 여기서 OAI로 전달하는 변형 가능
-                buf: bytes = msg["bytes"]
-                await ws.send_text(jdumps({
-                    "type": "binary_ack",
-                    "payload": {"received_bytes": len(buf)}
-                }))
-
     except WebSocketDisconnect:
         pass
     finally:
@@ -188,9 +168,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
             if etype.endswith(".delta"):
                 text = evt.get("delta") or evt.get("text") or evt.get("content") or ""
                 await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
-                # pass
             elif etype.endswith(".completed"):
-                # 3-1) 최종 전사 수신
                 final_text = (evt.get("transcript") or evt.get("content") or "").strip()
                 sess.end_scripting_time = time.time()
                 
@@ -212,9 +190,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 dprint("current_translated", sess.current_translated)
 
                 # --- 여기부터 교체 ---
-                # 동기 translate를 스레드에서 비동기처럼 실행(스트리밍 콜백 유지)
                 translated_text = await run_translate_async(sess)
-                # --- 교체 끝 ---
                 sess.end_translation_time = time.time()
                 lprint("translation time : ", sess.end_translation_time - sess.end_scripting_time)
 
@@ -260,7 +236,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
 async def teardown_session(sess: Session):
     sess.running = False
 
-    tasks = [sess.tts_task, sess.oai_task, sess.sender_task]
+    tasks = [sess.oai_task, sess.sender_task]
     # 1) 모두 취소
     for t in tasks:
         if t and not t.done():
@@ -272,12 +248,6 @@ async def teardown_session(sess: Session):
     if sess.oai_ws:
         with contextlib.suppress(Exception):
             await sess.oai_ws.close()
-    if sess.tts_ws:
-        with contextlib.suppress(Exception):
-            if sess.tts_ws.open:
-                await sess.tts_ws.send(jdumps({"text": ""}))  # EOS
-            await sess.tts_ws.wait_closed()
-        sess.tts_ws = None
 
 async def outbound_sender(sess: Session, client_ws: WebSocket):
     try:
@@ -297,42 +267,9 @@ async def run_translate_async(sess: Session) -> str:
     """
     loop = asyncio.get_running_loop()
 
-    def flush_tts_chunk():
-        if not sess.tts_buf or len(sess.tts_buf) == 0:
-            return
-        
-        chunk = "".join(sess.tts_buf).strip()
-        chunk = re.sub(r"<[^>]*>", "", chunk)
-
-        dprint("[flush_tts_chunk] ", repr(chunk))
-        sess.tts_buf.clear()
-        try:
-            # sess.tts_in_q.put_nowait(chunk) # 마지막 청크
-            chunks = chunk.split(" ")
-            for i in range(0, len(chunks), 3):
-                if i >= len(chunks) - 4:
-                    sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
-                    break
-                else:
-                    sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3])) # 기본적으로는 단어를 3개씩 끊어서 보내기
-        except asyncio.QueueFull:
-            dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
-
-    async def debounce_flush(delay_ms: int = 110):
-        try:
-            await asyncio.sleep(delay_ms / 1000)
-            flush_tts_chunk()
-        except Exception as e:
-            dprint("[debounce_flush] WARN: debounce_flush cancelled", e)
-
     def on_token(tok: str):
-        # 다른 스레드에서 불릴 수 있으므로 루프 스레드로 래핑
-        def _append_and_schedule():
-            sess.tts_buf.append(tok)
-            if sess.tts_debounce_task and not sess.tts_debounce_task.done():
-                sess.tts_debounce_task.cancel()
-            sess.tts_debounce_task = asyncio.create_task(debounce_flush(110))
-        loop.call_soon_threadsafe(_append_and_schedule)
+        # 굳이 여기서 할게 있나?
+        pass
 
     def run_blocking():
         # 동기 translate 호출
@@ -346,22 +283,12 @@ async def run_translate_async(sess: Session) -> str:
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
     output = await loop.run_in_executor(None, run_blocking)
-    dprint("llm output : ", output)
     final_text = output["text"]
     dprint("final_text : ", final_text)
+
     sess.llm_cached_token_count += output["prompt_tokens_cached"]
     sess.llm_input_token_count += output["prompt_tokens"]
     sess.llm_output_token_count += output["completion_tokens"]
-
-    if sess.tts_debounce_task and not sess.tts_debounce_task.done():
-        sess.tts_debounce_task.cancel()
-
-    def _final_flush():
-        if sess.tts_debounce_task and not sess.tts_debounce_task.done():
-            sess.tts_debounce_task.cancel()
-        flush_tts_chunk()
-
-    loop.call_soon_threadsafe(_final_flush)
 
     # 최종 결과 알림
     await sess.out_q.put(jdumps({"type": "translated", "text": final_text}))

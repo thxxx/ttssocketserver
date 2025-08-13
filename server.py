@@ -65,6 +65,8 @@ class Session:
         self.llm_input_token_count = 0
         self.llm_output_token_count = 0
         self.tts_output_token_count = 0
+
+        self.is_network_logging = False
         
 
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
@@ -97,6 +99,9 @@ async def ws_endpoint(ws: WebSocket):
                         "type": "latency.pong",
                         "t0": data["t0"], "t1": t1, "t2": t2
                     }))
+                    if not sess.is_network_logging:
+                        sess.is_network_logging = True
+                        lprint("network latency logging started")
                     continue
 
                 # 1) 세션 시작: OpenAI Realtime WS 연결
@@ -149,14 +154,14 @@ async def ws_endpoint(ws: WebSocket):
                         await ws.send_text(jdumps({"type": "error", "message": "session not started"}))
                         continue
                     
-                    t1 = int(time.time() * 1000)   # server recv
-                    t0 = data.get("t0")  # client send(ms)
-                    
-                    await ws.send_text(jdumps({
-                        "type": "audio.recv.ack",
-                        "t0": t0,
-                        "t1": t1
-                    }))
+                    if sess.is_network_logging
+                        t1 = int(time.time() * 1000)   # server recv
+                        t0 = data.get("t0")  # client send(ms)
+                        await ws.send_text(jdumps({
+                            "type": "audio.recv.ack",
+                            "t0": t0,
+                            "t1": t1
+                        }))
                     
                     # 현재는 base64가 아닌 PCM이 온다.
                     if data.get("audio") and 'data' in data.get("audio"):
