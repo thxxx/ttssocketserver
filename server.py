@@ -58,6 +58,7 @@ class Session:
         self.start_scripting_time = 0
         self.end_scripting_time = 0
         self.end_translation_time = 0
+        self.first_translated_token_output_time = 0
         self.end_tts_time = 0
 
         # time logging
@@ -230,6 +231,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
                 # pass
             elif etype.endswith(".completed"):
+                sess.first_translated_token_output_time = 0
                 # 3-1) 최종 전사 수신
                 final_text = (evt.get("transcript") or evt.get("content") or "").strip()
                 sess.end_scripting_time = time.time()
@@ -256,7 +258,8 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 translated_text = await run_translate_async(sess)
                 # --- 교체 끝 ---
                 sess.end_translation_time = time.time()
-                lprint("translation time : ", sess.end_translation_time - sess.end_scripting_time)
+                lprint("[Latency logging] script end to translate end time : ", sess.end_translation_time - sess.end_scripting_time)
+                lprint("[Latency logging] first to last translate token time : ", sess.end_translation_time - sess.first_translated_token_output_time)
 
                 translated_text = translated_text.replace("<SKIP>", "")
                 if translated_text == "" or translated_text is None:
@@ -367,6 +370,9 @@ async def run_translate_async(sess: Session) -> str:
 
     def on_token(tok: str):
         # 다른 스레드에서 불릴 수 있으므로 루프 스레드로 래핑
+        if sess.first_translated_token_output_time == 0:
+            sess.first_translated_token_output_time = time.time()
+
         def _append_and_schedule():
             sess.tts_buf.append(tok)
             if sess.tts_debounce_task and not sess.tts_debounce_task.done():
@@ -441,7 +447,7 @@ async def elevenlabs_streamer(
                         # 오디오 청크
                         if "audio" in data and data['audio'] is not None:
                             dprint("[elevenlabs_streamer] Is Final? : ", len(data['audio']), data["isFinal"])
-                            lprint("tts time : ", time.time() - sess.end_translation_time)
+                            lprint("tts time : ", time.time() - sess.first_translated_token_output_time)
                             await sess.out_q.put(jdumps({
                                 "type": "tts_audio",
                                 "format": output_format,

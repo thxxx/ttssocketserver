@@ -196,6 +196,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 lprint("translation time : ", sess.end_translation_time - sess.end_scripting_time)
 
                 translated_text = translated_text.replace("<SKIP>", "")
+                translated_text = translated_text.replace("...", "")
                 if translated_text == "" or translated_text is None:
                     continue
 
