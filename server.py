@@ -160,10 +160,10 @@ async def ws_endpoint(ws: WebSocket):
                     
                     # 현재는 base64가 아닌 PCM이 온다.
                     if data.get("audio") and 'data' in data.get("audio"):
-                        # b64 = base64.b64encode(bytes(data.get("audio")['data'])).decode('ascii')
+                        b64 = base64.b64encode(bytes(data.get("audio")['data'])).decode('ascii')
                         await sess.oai_ws.send(jdumps({
                             "type": "input_audio_buffer.append",
-                            "audio": data.get("audio")
+                            "audio": b64
                         }))
 
                 # 3) 커밋 신호 전달 (chunk 경계)
