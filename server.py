@@ -89,12 +89,11 @@ async def ws_endpoint(ws: WebSocket):
 
                 t = data.get("type")
 
-
                 # (A) 핑-퐁: 시계 오프셋 추정용
                 if t == "latency.ping":
                     t1 = int(time.time() * 1000)   # server recv
                     t2 = int(time.time() * 1000)   # server send (즉시)
-                    await ws.send_text(json.dumps({
+                    await ws.send_text(jdumps({
                         "type": "latency.pong",
                         "t0": data["t0"], "t1": t1, "t2": t2
                     }))
