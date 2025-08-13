@@ -153,7 +153,7 @@ async def ws_endpoint(ws: WebSocket):
                     t1 = int(time.time() * 1000)   # server recv
                     t0 = data.get("t0")  # client send(ms)
                     
-                    await ws.send_text(json.dumps({
+                    await ws.send_text(jdumps({
                         "type": "audio.recv.ack",
                         "t0": t0,
                         "t1": t1
