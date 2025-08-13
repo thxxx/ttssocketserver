@@ -167,7 +167,6 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
 
             if etype.endswith(".delta"):
                 text = evt.get("delta") or evt.get("text") or evt.get("content") or ""
-                dprint("delta : ", text)
                 await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
             elif etype.endswith(".completed"):
                 final_text = (evt.get("transcript") or evt.get("content") or "").strip()
@@ -186,7 +185,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 if len(sess.current_transcript) < 3:
                     continue
                 
-                dprint("prevScripts", sess.transcripts[-5:])
+                dprint("\nprevScripts", sess.transcripts[-5:])
                 dprint("current_scripted_sentence", sess.current_transcript)
                 dprint("current_translated", sess.current_translated)
 
@@ -210,7 +209,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                     # 저장 시에는 <END> 제거해서 넣는 걸 권장
                     translated_text = translated_text.replace("<END>", "").strip()
 
-                    sess.transcripts.append(translated_text)
+                    sess.transcripts.append(sess.current_transcript)
                     sess.translateds.append(translated_text)
 
                     # 다음 문장 누적용 버퍼 비우기

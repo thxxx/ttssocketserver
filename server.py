@@ -273,7 +273,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                     # 저장 시에는 <END> 제거해서 넣는 걸 권장
                     translated_text = translated_text.replace("<END>", "").strip()
 
-                    sess.transcripts.append(translated_text)
+                    sess.transcripts.append(sess.current_transcript)
                     sess.translateds.append(translated_text)
 
                     # 다음 문장 누적용 버퍼 비우기

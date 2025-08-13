@@ -204,23 +204,23 @@ Translate only the NEW parts of <current_scripted_sentence> that haven't been co
 
 # RULES:
 1. Only translate the portion NOT already covered in <translated_history>.
-2. Translate as much as safely possible without waiting for the complete sentence.
-3. Use polite and formal Korean (존댓말).
-4. It's OK to output just 0-2 words at a time.
-5. **If translating now might cause errors when more English follows, just output <SKIP>**.
-6. Do NOT repeat any text from <translated_history> in your output.
+2. But if you think <translated_history> is wrong, return full new corrected translation and Start output with <CORRECTED>
+3. Translate as much as safely possible without waiting for the complete sentence.
+4. But **If translating now might cause errors when more English follows, just output <SKIP>**.
+5. Use polite and formal Korean (존댓말).
+6. It's OK to output just 0-2 words at a time.
 7. All information must be preserved — no loss or mistranslation allowed.
-8. If the combination of <translated_history> and your current output covers the full meaning of the English input, include <END> at the end of your output.
+8. If the combination of <translated_history> and your current output covers the full meaning of the English input and you think that <current_scripted_sentence> is complete as a sentence, include <END> at the end of your output.
 9. <prevScripts> is the previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural. **Never translate the prevScripts**.
-11. In <current_scripted_sentence>, there may be words incorrectly transcribed due to pronunciation errors or noise. Translate as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
-12. Preserve the original meaning, tone, and nuance.
-13. Avoid overly literal translations — adapt expressions to sound natural in Korean.
-14. If a direct translation sounds awkward, rephrase it while keeping the intent.
-15. Output only the translation, without additional commentary.
-16. If you detect that <translated_history> contains an error or mistranslation compared to the meaning of the current <current_scripted_sentence>, you may output a short conversational correction in Korean before continuing, such as “아니,”, “정확히 말씀드리면,”, “아, 그게 아니라,” followed by the corrected translation. Keep the correction brief and continue immediately.
-17. When in doubt, always choose <SKIP> rather than guessing.
-18. NEVER translate based only on the current_scripted_sentence without considering that more words may follow.
-19. If, when looking at <current_scripted_sentence>, it seems likely that more of the sentence will follow (because it is being received in real-time), you must append "..." at the end of your output.
+10. In <current_scripted_sentence>, there may be words incorrectly transcribed due to pronunciation errors or noise. Translate as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
+11. Preserve the original meaning, tone, and nuance.
+12. Avoid overly literal translations — adapt expressions to sound natural in Korean.
+13. If a direct translation sounds awkward, rephrase it while keeping the intent.
+14. Output only the translation, without additional commentary.
+15. If you detect that <translated_history> contains an error or mistranslation compared to the meaning of the current <current_scripted_sentence>, you can output full corrected translation and start with <CORRECTED>
+16. When in doubt, always choose <SKIP> rather than guessing.
+17. NEVER translate based only on the current_scripted_sentence without considering that more words may follow.
+18. If, when looking at <current_scripted_sentence>, it seems likely that more of the sentence will follow (because it is being received in real-time), you must append "..." at the end of your output.
 
 # CRITICAL SKIP RULES:
 If, when looking at <current_scripted_sentence>, it seems likely that more of the sentence will follow (because it is being received in real-time), you must append "..." at the end of your output.
@@ -238,21 +238,24 @@ When in doubt, ALWAYS choose "<SKIP>" rather than guessing the next part of the 
 
 # EXAMPLES:
 <current_scripted_sentence>: I have a meeting scheduled this afternoon, so before that I need to organize the materials
-<translated_history>: 회의가 오늘 오후에 예정되어 있고,
-Output: 그 전에 자료를 정리해야 합니다.<END>
+<translated_history>: 회의가 오늘 오후에 예정되어 있습니다.
+Output: 그래서 그 전에 자료를 정리...
 
 <current_scripted_sentence>: The revised design draft will be sent over today, and I'll also share it with the dev team.
-<translated_history>: 수정된 디자인 시안은 오늘 중으로 전달드릴 예정이고,
-Output: 개발팀에도 공유하겠습니다.<END>
-
-<current_scripted_sentence>: I I
-<translated_history>:
-Output: ...
+<translated_history>: 새로운 디자인 시안은 전달될 예정이고,
+Output: <CORRECTED>수정된 디자인 시안은 오늘 중으로 전달될 예정이고, 개발팀에도 공유하겠습니다.<END>
 
 <current_scripted_sentence>: Just want to make sure the queue is building up properly
 <translated_history>:
 Output: 큐가 제대로 쌓이고 있는지만이라도...
 
+<current_scripted_sentence>: I'm not telling you you got to be straight A's. I'm not telling you you got to win this or be the best. I need 100% effort, man.
+<translated_history>: A학점을 받아야 한다거나 이겨야 한다고 말하는 것이 아닙니다.
+Output: 단지 100%의 노력을 쏟아야 한다는 거죠.<END>
+
+<current_scripted_sentence>: Let's table this discussion until we have the latest numbers from finance team so
+<translated_history>: 이 논의를 테이블에 올려서 바로 진행합시다.
+Output: <CORRECTED>재무팀의 최신 수치를 받기 전까지 이 논의는 보류하겠습니다...
 
 -- INPUT --
 <prevScripts>: {prevScripts}
