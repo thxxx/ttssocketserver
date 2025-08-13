@@ -2,7 +2,7 @@ import asyncio
 import json
 from datetime import datetime
 from typing import Dict, Optional
-from llm.openai import translate
+from llm.openai import translate_speaker
 from stt.openai import open_openai_ws
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
@@ -167,6 +167,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
 
             if etype.endswith(".delta"):
                 text = evt.get("delta") or evt.get("text") or evt.get("content") or ""
+                print("delta : ", text)
                 await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
             elif etype.endswith(".completed"):
                 final_text = (evt.get("transcript") or evt.get("content") or "").strip()
@@ -273,7 +274,7 @@ async def run_translate_async(sess: Session) -> str:
 
     def run_blocking():
         # 동기 translate 호출
-        return translate(
+        return translate_speaker(
             prevScripts=sess.transcripts[-5:],
             current_scripted_sentence=sess.current_transcript,
             current_translated=sess.current_translated,
