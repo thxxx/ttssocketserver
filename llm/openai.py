@@ -10,8 +10,10 @@ def translate(prevScripts:str, current_scripted_sentence:str, current_translated
     response = client.chat.completions.create(
         model='gpt-4.1-mini',  # 최신 경량 모델
         messages=[
-            {"role": "system", "content": "You are a helpful assistant, real-time Korean-to-English translator. Your job is to incrementally translate Korean speech as it comes in."},
+            {"role": "system", "content": "You are a professional translator specializing in [Korean] → [English] translation. Your job is to incrementally translate Korean speech as it comes in."},
             {"role": "user", "content": f"""
+Your task is to translate the input text into **natural, conversational spoken [English]**.
+
 # INPUT FORMAT:
 - <prevScripts>: Previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural, mitigating scripting errors. **Never translate the prevScripts**.
 - <current_scripted_sentence>: Current Korean sentence from speech recognition (may contain pronunciation errors)
@@ -35,6 +37,17 @@ Translate only the NEW parts of <current_scripted_sentence> that haven't been co
 Do not use any symbols that cannot be read aloud; if you must include them, write them as pronounceable words.
 12. In current_scripted_sentence, there may be words incorrectly transcribed by the scripting model due to pronunciation errors or noise. Translate the input sentence as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
 ex) '세마리 들리시나요?' -> 'Can you hear my voice?"
+
+13. Preserve the original meaning, tone, and nuance.
+14. Avoid overly literal translations — adapt expressions to sound natural to a native speaker.
+15. Use colloquial vocabulary and sentence structure common in spoken conversation.
+16. If a direct translation sounds awkward, rephrase it while keeping the intent.
+17. Output only the translation, without additional commentary.
+19. If you detect that <translated_history> contains an error or mistranslation compared to the meaning of the current <current_scripted_sentence>, 
+    you may output a short conversational correction in English before continuing, such as 
+    "I mean", "Actually", "Wait, no", "No, I meant", etc to naturally fix the meaning.
+    Keep the correction short and immediately follow it with the corrected translation.
+    The correction should feel like natural spoken conversation, not a formal retraction.
 
 한국어 발음을 받아적을 때 STT 모델이 자주 하는 발음 혼동/오인식 유형:
 
@@ -105,22 +118,6 @@ ex) '세마리 들리시나요?' -> 'Can you hear my voice?"
 8. Pause if Translation Could Be Wrong with More Input
 - If there’s a chance the meaning will change with additional Korean, return SKIP.
 
-# RULES AGAIN:
-1. Only translate the portion NOT already covered in <translated_history>
-2. Translate as much as safely possible without waiting for the complete sentence
-3. Use conversational/spoken English style
-4. It's OK to output just 0-2 words at a time
-5. Add natural fillers like "uhm" or "you know" if needed for natural flow
-6. **If translating now might cause errors when more Korean follows, just output <SKIP>**
-7. Do NOT repeat any text from <translated_history> in your output. You output should be english only.
-8. All information must be preserved - no loss or mistranslation allowed
-9. If the combination of <translated_history> and your current output covers the full meaning of the Korean input, include <END> at the end of your output.
-10. <prevScripts> is the previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural. **Never translate the prevScripts**.
-11. Write all numbers in words (e.g., one, two) instead of digits.
-Do not use any symbols that cannot be read aloud; if you must include them, write them as pronounceable words.
-12. In current_scripted_sentence, there may be words incorrectly transcribed by the scripting model due to pronunciation errors or noise. Translate the input sentence as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
-ex) '세마리 들리시나요?' -> 'Can you hear my voice?"
-
 ### CRITICAL SKIP RULES ###
 You must output '<SKIP>' and nothing else if ANY of the following is true:
 - The sentence might still continue with additional words that could change the meaning.
@@ -130,7 +127,7 @@ You must output '<SKIP>' and nothing else if ANY of the following is true:
 - The object or complement is incomplete and might change the meaning.
 - You are not 100% certain that your translation will remain correct after the next few Korean words.
 
-When in doubt, ALWAYS choose '<SKIP>'. Do not try to partially guess.
+When in doubt, ALWAYS choose '<SKIP>'. Do not try to guess the next sentence.
 NEVER translate based only on the current_scripted_sentence without considering that more words may follow.
 
 EXAMPLE:
@@ -167,9 +164,15 @@ Only output the new translation. No explanations or additional text.
 
     sent = ''
     for chunk in response:
-        if chunk.choices[0].delta.content != '' and chunk.choices[0].delta.content is not None:
-            onToken(chunk.choices[0].delta.content)
-            sent += chunk.choices[0].delta.content
+        if chunk.usage and chunk.usage is not None:
+            u = chunk.usage;
+            u.prompt_tokens
+            u.prompt_tokens_details.cached_tokens
+            u.completion_tokens
+        else:
+            if chunk.choices[0].delta.content != '' and chunk.choices[0].delta.content is not None:
+                onToken(chunk.choices[0].delta.content)
+                sent += chunk.choices[0].delta.content
 
     return sent
 

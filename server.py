@@ -59,6 +59,14 @@ class Session:
         self.end_translation_time = 0
         self.end_tts_time = 0
 
+        # time logging
+        self.connection_start_time = 0
+        self.llm_cached_token_count = 0
+        self.llm_input_token_count = 0
+        self.llm_output_token_count = 0
+        self.tts_output_token_count = 0
+        
+
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
 
 @app.websocket("/ws")
@@ -85,6 +93,7 @@ async def ws_endpoint(ws: WebSocket):
                 if t == "scriptsession.start":
                     if sess.oai_ws is None:
                         sess.oai_ws = await open_openai_ws()
+                        sess.connection_start_time = time.time()
                         model_name = data.get("model") or 'gpt-4o-mini-transcribe'
                         
                         initMsg = {
@@ -130,6 +139,7 @@ async def ws_endpoint(ws: WebSocket):
                         await ws.send_text(jdumps({"type": "error", "message": "session not started"}))
                         continue
                     
+                    # 현재는 base64가 아닌 PCM이 온다.
                     if data.get("audio") and 'data' in data.get("audio"):
                         b64 = base64.b64encode(bytes(data.get("audio")['data'])).decode('ascii')
                         await sess.oai_ws.send(jdumps({
@@ -151,7 +161,12 @@ async def ws_endpoint(ws: WebSocket):
                 elif t == "session.close":
                     await ws.send_text(jdumps({
                         "type": "session.close",
-                        "payload": {"status": "closed successfully"}
+                        "payload": {"status": "closed successfully"},
+                        "connected_time": time.time() - sess.connection_start_time,
+                        "llm_cached_token_count": sess.llm_cached_token_count,
+                        "llm_input_token_count": sess.llm_input_token_count,
+                        "llm_output_token_count": sess.llm_output_token_count,
+                        "tts_output_token_count": sess.tts_output_token_count,
                     }))
                     break
 
@@ -346,8 +361,12 @@ async def run_translate_async(sess: Session) -> str:
 
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
-    final_text = await loop.run_in_executor(None, run_blocking)
+    output = await loop.run_in_executor(None, run_blocking)
+    final_text = output["text"]
     dprint("final_text : ", final_text)
+    sess.llm_cached_token_count += output["prompt_tokens_cached"]
+    sess.llm_input_token_count += output["prompt_tokens"]
+    sess.llm_output_token_count += output["completion_tokens"]
 
     if sess.tts_debounce_task and not sess.tts_debounce_task.done():
         sess.tts_debounce_task.cancel()
