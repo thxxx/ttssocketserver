@@ -1,5 +1,6 @@
 import os
 from websockets.asyncio.client import connect as ws_connect  # pip install websockets
+
 OPENAI_KEY = os.environ.get("OPENAI_KEY")
 
 async def open_openai_ws():
