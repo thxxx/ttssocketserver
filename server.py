@@ -125,7 +125,7 @@ async def ws_endpoint(ws: WebSocket):
                                 },
                                 # "turn_detection": None,
                                 "turn_detection": {
-                                    "type": 'semantic_vad',
+                                    "type": 'server_vad',
                                     "threshold": 0.4,
                                     "prefix_padding_ms": 200,
                                     "silence_duration_ms": 120,
