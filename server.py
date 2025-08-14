@@ -124,10 +124,10 @@ async def ws_endpoint(ws: WebSocket):
                                     "language": (data.get("language") or "en")[:2],
                                 },
                                 "turn_detection": {
-                                    "type": 'server_vad',
+                                    "type": None,
                                     "threshold": 0.4,
                                     "prefix_padding_ms": 200,
-                                    "silence_duration_ms": 1200,
+                                    "silence_duration_ms": 120,
                                 },
                                 "input_audio_noise_reduction": { "type": 'far_field' },
                             },
