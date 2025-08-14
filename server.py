@@ -60,6 +60,7 @@ class Session:
         self.end_translation_time = 0
         self.first_translated_token_output_time = 0
         self.end_tts_time = 0
+        self.end_audio_input_time = 0
 
         # time logging
         self.connection_start_time = 0
@@ -126,7 +127,7 @@ async def ws_endpoint(ws: WebSocket):
                                     "type": 'server_vad',
                                     "threshold": 0.4,
                                     "prefix_padding_ms": 200,
-                                    "silence_duration_ms": 150,
+                                    "silence_duration_ms": 120,
                                 },
                                 "input_audio_noise_reduction": { "type": 'far_field' },
                             },
@@ -175,6 +176,7 @@ async def ws_endpoint(ws: WebSocket):
 
                 # 3) 커밋 신호 전달 (chunk 경계)
                 elif t == "input_audio_buffer.commit":
+                    sess.end_audio_input_time = time.time()
                     if not sess.oai_ws:
                         await ws.send_text(jdumps({"type": "error", "message": "session not started"}))
                         continue
@@ -231,6 +233,8 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
                 # pass
             elif etype.endswith(".completed"):
+                lprint("latency to transcribe end : ", time.time() - sess.end_audio_input_time)
+                
                 sess.first_translated_token_output_time = 0
                 # 3-1) 최종 전사 수신
                 final_text = (evt.get("transcript") or evt.get("content") or "").strip()
