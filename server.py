@@ -128,7 +128,7 @@ async def ws_endpoint(ws: WebSocket):
                                     "type": 'server_vad',
                                     "threshold": 0.4,
                                     "prefix_padding_ms": 200,
-                                    "silence_duration_ms": 120,
+                                    "silence_duration_ms": 60,
                                 },
                                 "input_audio_noise_reduction": { "type": 'far_field' },
                             },
