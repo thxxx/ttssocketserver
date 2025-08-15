@@ -128,7 +128,7 @@ async def ws_endpoint(ws: WebSocket):
                                     "type": 'server_vad',
                                     "threshold": 0.4,
                                     "prefix_padding_ms": 200,
-                                    "silence_duration_ms": 60,
+                                    "silence_duration_ms": 80,
                                 },
                                 "input_audio_noise_reduction": { "type": 'far_field' },
                             },
@@ -179,6 +179,7 @@ async def ws_endpoint(ws: WebSocket):
                 elif t == "input_audio_buffer.commit":
                     lprint("input_audio_buffer.commit")
                     sess.end_audio_input_time = time.time()
+                    sess.end_tts_time = 0
                     if not sess.oai_ws:
                         await ws.send_text(jdumps({"type": "error", "message": "session not started"}))
                         continue
@@ -235,7 +236,7 @@ async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
                 await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
                 # pass
             elif etype.endswith(".completed"):
-                lprint("latency to transcribe end : ", time.time() - sess.end_audio_input_time)
+                # lprint("latency to transcribe end : ", time.time() - sess.end_audio_input_time)
 
                 sess.first_translated_token_output_time = 0
                 # 3-1) 최종 전사 수신
@@ -363,7 +364,7 @@ async def run_translate_async(sess: Session) -> str:
                     sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
                     break
                 else:
-                    sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3])) # 기본적으로는 단어를 3개씩 끊어서 보내기
+                    sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3]) + " ") # 기본적으로는 단어를 3개씩 끊어서 보내기
         except asyncio.QueueFull:
             dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
 
@@ -448,6 +449,8 @@ async def elevenlabs_streamer(
                     async for msg in elws:
                         # ElevenLabs는 text 프레임(JSON)로 응답
                         data = json.loads(msg)
+                        if sess.end_tts_time == 0:
+                            lprint("Audio end to first audio output time : ", time.time() - sess.end_audio_input_time)
                         sess.end_tts_time = time.time()
 
                         # 오디오 청크
