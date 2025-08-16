@@ -25,8 +25,28 @@ import soundfile as sf
 from faster_whisper import WhisperModel
 
 # === 전역 모델 1회 로드 (프로세스 시작 시) ===
-WHISPER_SR = 24000
-_whisper_model = WhisperModel("large-v3-turbo", device="cuda", compute_type="float16")
+
+# Load model directly
+from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq, pipeline
+import torch
+
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+koprocessor = AutoProcessor.from_pretrained("o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2")
+komodel = AutoModelForSpeechSeq2Seq.from_pretrained("o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2")
+
+pipe = pipeline(
+    "automatic-speech-recognition",
+    model=komodel,
+    tokenizer=koprocessor.tokenizer,
+    feature_extractor=koprocessor.feature_extractor,
+    torch_dtype=torch_dtype,
+    device=device,
+)
+
+WHISPER_SR = 16000
+# _whisper_model = WhisperModel("large-v3-turbo", device="cuda", compute_type="float16")
 
 VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "wj5ree7FcgKDPFphpPWQ")
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
@@ -250,22 +270,29 @@ async def transcribe_pcm_with_whisper(pcm_bytes: bytes, sample_rate: int, channe
 
     # 3) faster-whisper 호출 (numpy 배열 직접 입력)
     #    - 실시간/저지연 최적화 기본 설정
-    segments, info = _whisper_model.transcribe(
-        audio,
-        beam_size=1,
-        word_timestamps=False,
-        vad_filter=True,
-        condition_on_previous_text=True,
-        temperature=0.2,
-        chunk_length=15,
-        language="ko"
-    )
-    dprint(info.language, info.duration)
-    for seg in segments:
-        dprint(f"[{seg.start:.2f} → {seg.end:.2f}] {seg.text}")
+    # segments, info = _whisper_model.transcribe(
+    #     audio,
+    #     beam_size=1,
+    #     word_timestamps=False,
+    #     vad_filter=True,
+    #     condition_on_previous_text=True,
+    #     temperature=0.2,
+    #     chunk_length=15,
+    #     language="ko"
+    # )
+    # dprint(info.language, info.duration)
+    # for seg in segments:
+    #     dprint(f"[{seg.start:.2f} → {seg.end:.2f}] {seg.text}")
 
-    # 4) 결과 합치기
-    text = "".join(seg.text for seg in segments).strip()
+    # # 4) 결과 합치기
+    # text = "".join(seg.text for seg in segments).strip()
+
+    result = pipe(
+        audio,
+        generate_kwargs={"language":"korean"}
+    )
+    text = result.get("text", '---')
+    
     return text
 
 # 3) relay_openai_to_client 수정본
