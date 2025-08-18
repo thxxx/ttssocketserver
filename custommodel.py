@@ -1,6 +1,5 @@
 import asyncio
 import json
-from datetime import datetime
 from typing import Dict, Optional
 from llm.openai import translate
 from stt.openai import open_openai_ws
@@ -19,9 +18,7 @@ def jdumps(o): return json.dumps(o).decode()  # bytes -> str
 
 # === 맨 위 import들에 추가 ===
 import numpy as np
-import io
 import librosa
-import soundfile as sf
 from faster_whisper import WhisperModel
 
 # === 전역 모델 1회 로드 (프로세스 시작 시) ===
@@ -29,21 +26,24 @@ from faster_whisper import WhisperModel
 # Load model directly
 from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq, pipeline
 import torch
+import nemo.collections.asr as nemo_asr
+
+asr_model = nemo_asr.models.ASRModel.from_pretrained("nvidia/canary-1b-v2")
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-koprocessor = AutoProcessor.from_pretrained("o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2")
-komodel = AutoModelForSpeechSeq2Seq.from_pretrained("o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2")
+# koprocessor = AutoProcessor.from_pretrained("o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2")
+# komodel = AutoModelForSpeechSeq2Seq.from_pretrained("o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2")
 
-pipe = pipeline(
-    "automatic-speech-recognition",
-    model=komodel,
-    tokenizer=koprocessor.tokenizer,
-    feature_extractor=koprocessor.feature_extractor,
-    torch_dtype=torch_dtype,
-    device=device,
-)
+# pipe = pipeline(
+#     "automatic-speech-recognition",
+#     model=komodel,
+#     tokenizer=koprocessor.tokenizer,
+#     feature_extractor=koprocessor.feature_extractor,
+#     torch_dtype=torch_dtype,
+#     device=device,
+# )
 
 WHISPER_SR = 16000
 # _whisper_model = WhisperModel("large-v3-turbo", device="cuda", compute_type="float16")
@@ -91,6 +91,7 @@ class Session:
         # onToken에서 단어/프레이즈 coalescing용
         self.tts_buf: list[str] = []
         self.tts_debounce_task: Optional[asyncio.Task] = None
+        self.buf_count = 0
 
         # variables for logging
         self.start_scripting_time = 0
@@ -108,6 +109,7 @@ class Session:
         self.tts_output_token_count = 0
 
         self.is_network_logging = False
+
         
 
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
@@ -178,6 +180,22 @@ async def ws_endpoint(ws: WebSocket):
                             "t0": t0,
                             "t1": t1
                         }))
+                    
+                    # 한 5개 쌓일때마다 한번씩?
+                    sess.buf_count += 1
+                    if sess.buf_count % 5 == 4:
+                        # 지금까지 누적된 PCM을 Whisper에 태워서 script 추출
+                        buf = bytes(sess.audio_buf)
+                        sess.audio_buf.clear()  # 다음 청크 대비 비우기
+
+                        # 비동기 실행 (블로킹 피함)
+                        t00 = time.time()
+                        transcript = await transcribe_pcm_with_whisper(
+                            pcm_bytes=buf,
+                            sample_rate=sess.input_sample_rate,
+                            channels=sess.input_channels
+                        )
+                        dprint(f"[{time.time()*1000 - t00:.2f*1000}ms] scripting : ", transcript)
 
                     dprint("들어오고 있습니다.")
                     a = data.get("audio")
@@ -287,11 +305,12 @@ async def transcribe_pcm_with_whisper(pcm_bytes: bytes, sample_rate: int, channe
     # # 4) 결과 합치기
     # text = "".join(seg.text for seg in segments).strip()
 
-    result = pipe(
-        audio,
-        generate_kwargs={"language":"korean"}
-    )
-    text = result.get("text", '---')
+    # result = pipe(
+    #     audio,
+    #     generate_kwargs={"language":"korean"}
+    # )
+    result = asr_model.transcribe(audio)
+    text = result[0].get("text", '---')
     
     return text
 
