@@ -2,7 +2,7 @@ import asyncio
 import json
 from datetime import datetime
 from typing import Dict, Optional
-from llm.openai import translate_speaker
+from llm.openai import translate_speaker, translate_speaker_make_end
 from stt.openai import open_openai_ws
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
@@ -162,6 +162,7 @@ async def ws_endpoint(ws: WebSocket):
                                 # === 여기서 VAD 검사 ===
                                 vads = time.time()
                                 vad_event = feed_pcm16le_bytes(audio)
+                                
                                 if vad_event == "end" and sess.audios.size>WHISPER_SR*1.5:
                                     target_audios = sess.audios
                                     sess.audios = np.empty(0, dtype=np.float32)
@@ -169,6 +170,8 @@ async def ws_endpoint(ws: WebSocket):
                                     t00 = time.time()
                                     transcript = await transcribe_pcm(audios=target_audios)
                                     dprint(f"[{time.time() - t00:.2f}s] scripting : ", transcript, f"  {target_audios.size}", "\n")
+                                    if len(transcript)<3 or set(transcript) == " ":
+                                        continue
     
                                     # 클라이언트로 최종 전사 전송
                                     await sess.out_q.put(jdumps({
@@ -285,9 +288,9 @@ async def translate_next(sess: Session, final_text: str):
     dprint("current_translated", sess.current_translated)
 
     # --- 여기부터 교체 ---
-    translated_text = await run_translate_async(sess)
+    translated_text, is_cached = await run_translate_async(sess)
     sess.end_translation_time = time.time()
-    lprint("translation time : ", sess.end_translation_time - sess.end_scripting_time)
+    lprint(f"[{is_cached}, {sess.end_translation_time - sess.end_scripting_time:.2f}] translation : ", translated_text)
 
     translated_text = translated_text.replace("<SKIP>", "")
     translated_text = translated_text.replace("...", "")
@@ -310,87 +313,6 @@ async def translate_next(sess: Session, final_text: str):
         # 다음 문장 누적용 버퍼 비우기
         sess.current_transcript = ""
         sess.current_translated = ""
-
-# 3) relay_openai_to_client 수정본x
-async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
-    try:
-        async for raw in sess.oai_ws:
-            try:
-                evt = json.loads(raw)
-            except Exception:
-                await sess.out_q.put(raw)
-                continue
-
-            etype = evt.get("type", "")
-
-            if etype.endswith(".delta"):
-                text = evt.get("delta") or evt.get("text") or evt.get("content") or ""
-                await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
-            elif etype.endswith(".completed"):
-                final_text = (evt.get("transcript") or evt.get("content") or "").strip()
-                sess.end_scripting_time = time.time()
-                
-                await sess.out_q.put(jdumps({
-                    "type": "transcript", "text": final_text, "final": True
-                }))
-
-                # 3-2) 연결별 누적 전사 업데이트
-                if sess.current_transcript:
-                    sess.current_transcript += " " + final_text
-                else:
-                    sess.current_transcript = final_text
-                
-                # 너무 짧은 문장이나 단어는 굳이 바로 번역하지 않기.
-                if len(sess.current_transcript) < 6:
-                    continue
-                
-                dprint("\nprevScripts", sess.transcripts[-5:])
-                dprint("current_scripted_sentence", sess.current_transcript)
-                dprint("current_translated", sess.current_translated)
-
-                # --- 여기부터 교체 ---
-                translated_text = await run_translate_async(sess)
-                sess.end_translation_time = time.time()
-                lprint("translation time : ", sess.end_translation_time - sess.end_scripting_time)
-
-                translated_text = translated_text.replace("<SKIP>", "")
-                translated_text = translated_text.replace("...", "")
-                if translated_text == "" or translated_text is None:
-                    continue
-
-                # 3-5) 누적 번역 업데이트 (공백 관리)
-                if sess.current_translated and "<CORRECTED>" not in translated_text:
-                    sess.current_translated += " " + translated_text
-                else:
-                    sess.current_translated = translated_text
-
-                # 3-6) 문장 종료(<END>) 처리
-                if "<END>" in translated_text:
-                    # 저장 시에는 <END> 제거해서 넣는 걸 권장
-                    translated_text = translated_text.replace("<END>", "").strip()
-
-                    sess.transcripts.append(sess.current_transcript)
-                    sess.translateds.append(translated_text)
-
-                    # 다음 문장 누적용 버퍼 비우기
-                    sess.current_transcript = ""
-                    sess.current_translated = ""
-
-            elif etype == "error":
-                await sess.out_q.put(jdumps({
-                    "type": "error", "message": evt.get("error", evt)
-                }))
-            else:
-                await sess.out_q.put(jdumps({
-                    "type": "oai_event", "event": evt
-                }))
-
-    except ConnectionClosed:
-        pass
-    except Exception as e:
-        await sess.out_q.put(jdumps({
-            "type": "error", "message": f"OAI relay error: {e}"
-        }))
 
 
 async def teardown_session(sess: Session):
@@ -428,12 +350,22 @@ async def run_translate_async(sess: Session) -> str:
     loop = asyncio.get_running_loop()
 
     def run_blocking():
-        # 동기 translate 호출
-        return translate_speaker(
-            prevScripts=sess.transcripts[-5:],
-            current_scripted_sentence=sess.current_transcript,
-            current_translated=sess.current_translated,
-        )
+        context = ' '.join(sess.transcripts[-8:])
+        
+        # 여기서 만약 sess.current_transcript가 너무 길면, 최대한 전체를 다 번역하도록 하는게 좋지 않을까?
+        if len(sess.current_transcript) >= 150 and sess.current_transcript[-1] in [".", "?", "!"]:
+            dprint("MAKE END를 호출")
+            return translate_speaker_make_end(
+                prevScripts=context,
+                current_scripted_sentence=sess.current_transcript,
+                current_translated=sess.current_translated,
+            )
+        else:
+            return translate_speaker(
+                prevScripts=context,
+                current_scripted_sentence=sess.current_transcript,
+                current_translated=sess.current_translated,
+            )
 
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
@@ -444,7 +376,8 @@ async def run_translate_async(sess: Session) -> str:
     sess.llm_cached_token_count += output["prompt_tokens_cached"]
     sess.llm_input_token_count += output["prompt_tokens"]
     sess.llm_output_token_count += output["completion_tokens"]
-    return output["text"]
+    
+    return output["text"], True if output["prompt_tokens_cached"]>0 else False
 
 # 필요 import
 import contextlib
