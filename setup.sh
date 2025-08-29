@@ -23,6 +23,10 @@ pip install cn2an inflect
 pip install jieba piper_phonemize pypinyin
 pip install "setuptools<81"
 
-pip install k2==1.24.4.dev20250807+cuda12.8.torch2.8.0 -f https://k2-fsa.github.io/k2/cuda.html
-pip uninstall -y torchaudio
-pip install torchaudio
+# pip install k2==1.24.4.dev20250807+cuda12.8.torch2.8.0 -f https://k2-fsa.github.io/k2/cuda.html
+# pip install k2==1.24.4.dev20240211+cuda12.1.torch2.2.0 -f https://k2-fsa.github.io/k2/cuda.html
+# pip uninstall -y torchaudio
+# pip install torchaudio
+
+pip install vllm
+pip install --upgrade "pyzmq<26"

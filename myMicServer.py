@@ -1,7 +1,37 @@
+# --- MUST be at the very top (before any vllm/torch import) ---
+import os, socket, multiprocessing as mp
+
+# 1) multiprocessing & vLLM spawn
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+try:
+    mp.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
+# 2) single GPU & stable dist defaults
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
+
+# 3) avoid MASTER_PORT collisions on reload/restarts
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+os.environ["MASTER_ADDR"] = "127.0.0.1"
+os.environ["MASTER_PORT"] = str(_free_port())
+
+# (옵션) NCCL 이슈 회피: 단일 GPU면 괜찮지만, 도커/IB 환경이면 아래도 도움됨
+os.environ.setdefault("NCCL_P2P_DISABLE", "1")
+os.environ.setdefault("NCCL_IB_DISABLE", "1")
+os.environ.setdefault("NCCL_BLOCKING_WAIT", "1")
+# ---------------------------------------------------------------
+
 import asyncio
 import json
 from typing import Dict, Optional
 from llm.openai import translate, translate_simple
+from llm.custom import load_llm
 from stt.openai import open_openai_ws
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
@@ -16,6 +46,8 @@ import numpy as np
 import librosa
 import torch
 import contextlib
+import os, multiprocessing as mp
+import math
 
 from stt.asr import load_asr_backend
 from stt.vad import check_audio_state
@@ -26,11 +58,11 @@ from tts.zipvoice_infer import load_infer_context, generate_sentence
 ctx = load_infer_context()
 ZIP_PROMPT_WAV_PATH = os.environ.get(
     "ZIPVOICE_PROMPT_WAV",
-    "/workspace/ttssocketserver/tts/voice.wav",
+    "/workspace/ttssocketserver/tts/khj.wav",
 )
 ZIP_PROMPT_TEXT = os.environ.get(
     "ZIPVOICE_PROMPT_TEXT",
-    "This is a test.",
+    "Please limit your phone booth usage to 1 hour. and do not leave your belongings unattended for your neighborhoods.",
 )
 
 DEBUG = True
@@ -49,9 +81,27 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 app = FastAPI()
 
 ASR = load_asr_backend(kind="korean")
+LLM = None
+# LLM = load_llm()
 
 INPUT_SAMPLE_RATE = 24000
 WHISPER_SR = 16000
+
+@app.on_event("startup")
+def init_models():
+    # 멀티프로세싱/환경 변수는 가장 먼저
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["VLLM_NO_USAGE_STATS"] = "1"
+    # 파이썬 멀티프로세싱 start method도 spawn으로
+    try:
+        mp.set_start_method("spawn")
+    except RuntimeError:
+        pass
+
+    global LLM
+    if LLM is None:
+        LLM = load_llm()
 
 # 클라이언트 1명당 OpenAI Realtime WS를 하나씩 유지하기 위한 세션 상태
 class Session:
@@ -173,7 +223,6 @@ async def ws_endpoint(ws: WebSocket):
 
                 # 2) 오디오 append → Open AI로 그대로 전달
                 elif t == "input_audio_buffer.append":
-                    print("--")
                     try:
                         aud = data.get("audio")
                         if aud:
@@ -188,6 +237,7 @@ async def ws_endpoint(ws: WebSocket):
                             # === 그냥 1초 단위로 해보자 ===
                             if sess.buf_count%16==15 and sess.current_audio_sate == "start":
                                 st = time.time()
+                                sess.audios = sess.audios[:16000*25]
                                 pcm_bytes = (np.clip(sess.audios, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
                                 transcript = await transcribe_pcm_generic(
                                     audios=pcm_bytes,
@@ -289,12 +339,8 @@ async def translate_next(sess: Session, final_text: str):
         sess.current_transcript = final_text
     
     # 너무 짧은 문장이나 단어는 굳이 바로 번역하지 않기.
-    if len(sess.current_transcript)<6 or set(final_text) == " ":
+    if len(sess.current_transcript)<6 or final_text.strip() == "":
         return
-    
-    # dprint("\nprevScripts", sess.transcripts[-5:])
-    # dprint("current_scripted_sentence", sess.current_transcript)
-    # dprint("current_translated", sess.current_translated)
 
     # run_translate_async안에서 바로 결과를 client에게 보낸다.
     st = time.time()
@@ -325,93 +371,6 @@ async def translate_next(sess: Session, final_text: str):
         # 다음 문장 누적용 버퍼 비우기
         sess.current_transcript = ""
         sess.current_translated = ""
-
-async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
-    try:
-        async for raw in sess.oai_ws:
-            try:
-                evt = json.loads(raw)
-            except Exception:
-                await sess.out_q.put(raw)
-                continue
-
-            etype = evt.get("type", "")
-
-            if etype.endswith(".delta"):
-                text = evt.get("delta") or evt.get("text") or evt.get("content") or ""
-                await sess.out_q.put(jdumps({"type": "delta", "text": text})) # 거의 걸리지 않음.
-                # pass
-            elif etype.endswith(".completed"):
-                # lprint("latency to transcribe end : ", time.time() - sess.end_audio_input_time)
-
-                sess.first_translated_token_output_time = 0
-                # 3-1) 최종 전사 수신
-                final_text = (evt.get("transcript") or evt.get("content") or "").strip()
-                sess.end_scripting_time = time.time()
-                
-                await sess.out_q.put(jdumps({
-                    "type": "transcript", "text": final_text, "final": True
-                }))
-
-                # 3-2) 연결별 누적 전사 업데이트
-                if sess.current_transcript:
-                    sess.current_transcript += " " + final_text
-                else:
-                    sess.current_transcript = final_text
-                
-                if len(sess.current_transcript) < 3:
-                    continue
-                
-                dprint("prevScripts", sess.transcripts[-5:])
-                dprint("current_scripted_sentence", sess.current_transcript)
-                dprint("current_translated", sess.current_translated)
-
-                # --- 여기부터 교체 ---
-                # 동기 translate를 스레드에서 비동기처럼 실행(스트리밍 콜백 유지)
-                translated_text = await run_translate_async(sess)
-                # --- 교체 끝 ---
-                sess.end_translation_time = time.time()
-                lprint("[Latency logging] script end to translate end time : ", sess.end_translation_time - sess.end_scripting_time)
-                lprint("[Latency logging] first to last translate token time : ", sess.end_translation_time - sess.first_translated_token_output_time)
-
-                translated_text = translated_text.replace("<SKIP>", "")
-                if translated_text == "" or translated_text is None:
-                    continue
-
-                # 3-5) 누적 번역 업데이트 (공백 관리)
-                if sess.current_translated:
-                    sess.current_translated += " " + translated_text
-                else:
-                    sess.current_translated = translated_text
-
-                # 3-6) 문장 종료(<END>) 처리
-                if "<END>" in translated_text:
-                    # 저장 시에는 <END> 제거해서 넣는 걸 권장
-                    translated_text = translated_text.replace("<END>", "").strip()
-
-                    sess.transcripts.append(sess.current_transcript)
-                    sess.translateds.append(translated_text)
-
-                    # 다음 문장 누적용 버퍼 비우기
-                    sess.current_transcript = ""
-                    sess.current_translated = ""
-
-            elif etype == "error":
-                await sess.out_q.put(jdumps({
-                    "type": "error", "message": evt.get("error", evt)
-                }))
-            else:
-                await sess.out_q.put(jdumps({
-                    "type": "oai_event", "event": evt
-                }))
-
-    except ConnectionClosed:
-        pass
-    except Exception as e:
-        await sess.out_q.put(jdumps({
-            "type": "error", "message": f"OAI relay error: {e}"
-        }))
-
 
 async def teardown_session(sess: Session):
     sess.running = False
@@ -460,7 +419,7 @@ async def run_translate_async(sess: Session) -> str:
         chunk = "".join(sess.tts_buf).strip()
         chunk = re.sub(r"<[^>]*>", "", chunk)
 
-        # dprint("[flush_tts_chunk] ", repr(chunk))
+        dprint("[flush_tts_chunk] ", repr(chunk))
         sess.tts_buf.clear()
         try:
             # sess.tts_in_q.put_nowait(chunk) # 마지막 청크
@@ -483,6 +442,7 @@ async def run_translate_async(sess: Session) -> str:
             dprint("[debounce_flush] WARN: debounce_flush cancelled", e)
 
     def on_token(tok: str):
+        return
         # 다른 스레드에서 불릴 수 있으므로 루프 스레드로 래핑
         if sess.first_translated_token_output_time == 0:
             sess.first_translated_token_output_time = time.time()
@@ -496,6 +456,7 @@ async def run_translate_async(sess: Session) -> str:
 
     def run_blocking():
         # 동기 translate 호출
+        # return LLM.translate(sess.current_transcript)
         return translate_simple(
             prevScripts=sess.transcripts[-5:],
             current_scripted_sentence=sess.current_transcript,
@@ -512,9 +473,9 @@ async def run_translate_async(sess: Session) -> str:
         dprint("No translated text")
         return ''
     
-    sess.llm_cached_token_count += output["prompt_tokens_cached"]
-    sess.llm_input_token_count += output["prompt_tokens"]
-    sess.llm_output_token_count += output["completion_tokens"]
+    # sess.llm_cached_token_count += output["prompt_tokens_cached"]
+    # sess.llm_input_token_count += output["prompt_tokens"]
+    # sess.llm_output_token_count += output["completion_tokens"]
 
     if sess.tts_debounce_task and not sess.tts_debounce_task.done():
         sess.tts_debounce_task.cancel()
@@ -525,6 +486,7 @@ async def run_translate_async(sess: Session) -> str:
         flush_tts_chunk()
 
     loop.call_soon_threadsafe(_final_flush)
+    await sess.tts_in_q.put(final_text)
 
     # 최종 결과 알림
     await sess.out_q.put(jdumps({"type": "translated", "text": final_text}))
@@ -575,18 +537,43 @@ async def zipvoice_streamer(sess: Session, prompt_text: str, prompt_wav_path: st
                     arr = arr.reshape(-1)
 
                 # float32(-1..1) -> int16 PCM
-                pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
-                b64 = base64.b64encode(pcm).decode()
+                sr = ctx["sampling_rate"]   # 보통 24000
+                chunk_size = int(sr * 0.5)  # 0.5초 단위 샘플 수
+                
+                total_samples = len(arr)
+                num_chunks = math.ceil(total_samples / chunk_size)
+                
+                for i in range(num_chunks):
+                    start = i * chunk_size
+                    end = min((i + 1) * chunk_size, total_samples)
+                
+                    chunk_arr = arr[start:end]
+                
+                    # float32(-1..1) → int16 PCM
+                    pcm = (np.clip(chunk_arr, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+                    b64 = base64.b64encode(pcm).decode()
+                
+                    await sess.out_q.put(jdumps({
+                        "type": "tts_audio",
+                        "format": "pcm16le",
+                        "sample_rate": sr,
+                        "channels": 1,
+                        "audio": b64,
+                        # 마지막 청크일 때만 True로 표시
+                        "isFinal": (i == num_chunks - 1),
+                    }))
+                # pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+                # b64 = base64.b64encode(pcm).decode()
 
-                # 클라이언트로 전송 (형식 메타 포함)
-                await sess.out_q.put(jdumps({
-                    "type": "tts_audio",
-                    "format": "pcm16le",                  # 클라에서 디코딩할 포맷
-                    "sample_rate": ctx["sampling_rate"],  # 24000
-                    "channels": 1,
-                    "audio": b64,
-                    "isFinal": False,
-                }))
+                # # 클라이언트로 전송 (형식 메타 포함)
+                # await sess.out_q.put(jdumps({
+                #     "type": "tts_audio",
+                #     "format": "pcm16le",                  # 클라에서 디코딩할 포맷
+                #     "sample_rate": ctx["sampling_rate"],  # 24000
+                #     "channels": 1,
+                #     "audio": b64,
+                #     "isFinal": False,
+                # }))
 
                 lprint(f"[zipvoice_streamer] chunk TTS {len(arr)/ctx['sampling_rate']:.2f}s "
                       f"→ {time.time()-t0:.2f}s")
