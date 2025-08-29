@@ -12,9 +12,17 @@ except Exception:
     nemo_asr = None
 
 try:
-    from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq, pipeline  # type: ignore
+    from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq  # type: ignore
 except Exception:
     AutoProcessor = AutoModelForSpeechSeq2Seq = pipeline = None
+
+try:
+    from transformers import pipeline
+except Exception as e:
+    raise RuntimeError("transformers pipeline is not installed (import failed).") from e
+
+import os
+os.environ.setdefault("TRANSFORMERS_NO_TORCHVISION", "1")
 
 
 WHISPER_SR = 16000
@@ -131,7 +139,7 @@ class NemoASRBackend:
 # ---------------------------
 # Factory
 # ---------------------------
-BackendKind = Literal["hf", "nemo"]
+BackendKind = Literal["korean", "nemo"]
 
 def load_asr_backend(
     kind: Optional[BackendKind] = None,
@@ -139,10 +147,10 @@ def load_asr_backend(
 ) -> ASRBackend:
     """
     kind:
-      - "hf"   : Hugging Face transformers Whisper-like
+      - "korean"   : Hugging Face transformers Whisper-like
       - "nemo" : NVIDIA NeMo Canary 등
     kwargs:
-      - hf: model_id, device, dtype
+      - korean: model_id, device, dtype
       - nemo: pretrained_name, device
     """
     kind = (kind or os.getenv("ASR_BACKEND", "korean")).lower()
