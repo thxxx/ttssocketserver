@@ -1,4 +1,3 @@
-
 import base64
 import torch
 import torchaudio
@@ -28,18 +27,6 @@ def process_data_to_audio(aud, input_sample_rate: int, whisper_sr: int) -> np.nd
         return audio
     else:
         return None
-
-def feed_pcm16le_bytes(x):
-    t = torch.from_numpy(x)[:512] # 16kHz 기준, 길이가 512의 배수여야 한다.
-    
-    label = vad_iter(t, return_seconds=False)  # {'end': 212448} or {'start': 212448}
-
-    if label is not None:
-        if "start" in label:
-            return 'start'
-        if "end" in label:
-            return 'end'
-    return None
 
 # === Whisper 전사 함수 구현 ===
 async def transcribe_pcm_with_whisper(audios, sample_rate: int, channels: int) -> str:

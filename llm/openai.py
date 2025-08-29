@@ -6,6 +6,53 @@ OPENAI_KEY = os.environ.get("OPENAI_KEY")
 
 client = OpenAI(api_key=OPENAI_KEY)
 
+
+def translate_simple(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken:Callable[[str], None]):
+    print("호출됩니다.")
+    
+    response = client.chat.completions.create(
+        model='gpt-4.1-mini',  # 최신 경량 모델
+        messages=[
+            {"role": "system", "content": "You are a professional translator specializing in [Korean] → [English] translation. Your job is to incrementally translate Korean speech as it comes in."},
+            {"role": "user", "content": f"""
+아래의 <current_scripted_sentence>를 영어로 번역해줘. 근데 사람이 말하는걸 바로 기록한거라 잘못 알아들어서 오타가 섞여있을 수 있어. 알아서 감안한 뒤 번역해줘.
+Only retunr translated english, Do not include anything else.
+
+-- INPUT --
+<current_scripted_sentence> : {current_scripted_sentence}
+"""}
+        ],
+        temperature=0.5,
+        user="k2e-translator-v1-hojinkhj6051230808",
+        prompt_cache_key="k2e-translator-v1-hojinkhj6051230808",
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+
+    sent = ''
+
+    pt = 0
+    pt_cached = 0
+    ct = 0
+
+    for chunk in response:
+        if chunk.usage and chunk.usage is not None:
+            u = chunk.usage;
+            pt += u.prompt_tokens
+            pt_cached += u.prompt_tokens_details.cached_tokens
+            ct += u.completion_tokens
+        else:
+            if chunk.choices[0].delta.content != '' and chunk.choices[0].delta.content is not None:
+                onToken(chunk.choices[0].delta.content)
+                sent += chunk.choices[0].delta.content
+
+    return {
+        "text": sent,
+        "prompt_tokens": pt,
+        "prompt_tokens_cached": pt_cached,
+        "completion_tokens": ct,
+    }
+
 def translate(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken:Callable[[str], None]):
     response = client.chat.completions.create(
         model='gpt-4.1-mini',  # 최신 경량 모델

@@ -12,47 +12,11 @@ import base64
 import re
 import time
 from websockets.asyncio.client import connect as ws_connect
-
-print("=== server.py loaded ===")
-def jdumps(o): return json.dumps(o).decode()  # bytes -> str
-
-# === 맨 위 import들에 추가 ===
 import numpy as np
 import librosa
-from faster_whisper import WhisperModel
-
-# === 전역 모델 1회 로드 (프로세스 시작 시) ===
-
 # Load model directly
-from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq, pipeline
 import torch
-import nemo.collections.asr as nemo_asr
-
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-asr_model = nemo_asr.models.ASRModel.from_pretrained("nvidia/canary-1b-v2").to(device)
-print("Loaded")
-
-# koprocessor = AutoProcessor.from_pretrained("o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2")
-# komodel = AutoModelForSpeechSeq2Seq.from_pretrained("o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2")
-
-# pipe = pipeline(
-#     "automatic-speech-recognition",
-#     model=komodel,
-#     tokenizer=koprocessor.tokenizer,
-#     feature_extractor=koprocessor.feature_extractor,
-#     torch_dtype=torch_dtype,
-#     device=device,
-# )
-
-WHISPER_SR = 16000
-# _whisper_model = WhisperModel("large-v3-turbo", device="cuda", compute_type="float16")
-
-VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "wj5ree7FcgKDPFphpPWQ")
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
-
-app = FastAPI()
+from stt.asr import load_asr_backend, WHISPER_SR
 
 DEBUG = True
 def dprint(*a, **k): 
@@ -61,6 +25,30 @@ def dprint(*a, **k):
 LOGG = True
 def lprint(*a, **k): 
     if LOGG: print(*a, **k)
+
+def jdumps(o): return json.dumps(o).decode()
+
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "wj5ree7FcgKDPFphpPWQ")
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
+
+app = FastAPI()
+
+ASR = load_asr_backend(kind=os.getenv("ASR_BACKEND", "hf"))
+
+INPUT_SAMPLE_RATE = 24000
+INPUT_FRAME_MS = 32
+
+WHISPER_SR = 16000
+SAMPLE_RATE_FOR_VAD = 16000
+SAMPLES_PER_FRAME = SAMPLE_RATE_FOR_VAD * INPUT_FRAME_MS // 1000
+
+# Silero VAD 로드 (CPU OK)
+silero, utils = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
+(get_speech_timestamps, _, read_audio, VADIterator, collect_chunks) = utils
+vad_iter = VADIterator(silero, threshold=0.35, sampling_rate=SAMPLE_RATE_FOR_VAD, min_silence_duration_ms=150)
 
 # 클라이언트 1명당 OpenAI Realtime WS를 하나씩 유지하기 위한 세션 상태
 class Session:
@@ -71,8 +59,9 @@ class Session:
 
         # 오디오 누적 버퍼 (commit 시점에만 소비)
         self.audio_buf = bytearray()
-        # 클라이언트가 보내는 샘플레이트가 있다면 여기 갱신
-        self.input_sample_rate = WHISPER_SR
+        self.audios = np.empty(0, dtype=np.float32)
+        
+        self.input_sample_rate = INPUT_SAMPLE_RATE
         self.input_channels = 1
 
         self.current_transcript: str = ''
@@ -107,11 +96,21 @@ class Session:
         self.llm_cached_token_count = 0
         self.llm_input_token_count = 0
         self.llm_output_token_count = 0
-        self.tts_output_token_count = 0
+        self.stt_output_token_count = 0
 
         self.is_network_logging = False
 
+        self.new_speech_start = 0
+
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
+
+async def transcribe_pcm_generic(pcm_bytes: bytes, sample_rate: int, channels: int) -> str:
+    if not pcm_bytes:
+        return ""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: ASR.transcribe_pcm(pcm_bytes, sample_rate, channels, language="korean")
+    )
 
 @app.websocket("/speakerws")
 async def ws_endpoint(ws: WebSocket):
@@ -195,7 +194,7 @@ async def ws_endpoint(ws: WebSocket):
                             channels=sess.input_channels
                         )
                         dprint(f"[{time.time() - t00:.2f}s] scripting : ", transcript)
-
+                    
                     a = data.get("audio")
                     if a:
                         if isinstance(a, dict) and "data" in a:
@@ -263,55 +262,6 @@ async def ws_endpoint(ws: WebSocket):
     finally:
         await teardown_session(sess)
         sessions.pop(id(ws), None)
-
-# === Whisper 전사 함수 구현 ===
-async def transcribe_pcm_with_whisper(pcm_bytes: bytes, sample_rate: int, channels: int) -> str:
-    """
-    pcm_bytes: int16 리틀엔디언 PCM으로 가정.
-    sample_rate, channels: 클라이언트 메타 (없으면 16k/mono로 가정)
-    """
-    if not pcm_bytes:
-        return ""
-
-    # 1) int16 PCM → float32 [-1,1]
-    x = np.frombuffer(pcm_bytes, dtype=np.int16)
-    if channels > 1:
-        # [N*ch] → [N, ch] → mono 평균
-        x = x.reshape(-1, channels).mean(axis=1).astype(np.int16)
-    audio = x.astype(np.float32) / 32768.0
-
-    # 2) 리샘플(필요 시)
-    if sample_rate != WHISPER_SR:
-        audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=WHISPER_SR)
-
-    # 3) faster-whisper 호출 (numpy 배열 직접 입력)
-    #    - 실시간/저지연 최적화 기본 설정
-    # segments, info = _whisper_model.transcribe(
-    #     audio,
-    #     beam_size=1,
-    #     word_timestamps=False,
-    #     vad_filter=True,
-    #     condition_on_previous_text=True,
-    #     temperature=0.2,
-    #     chunk_length=15,
-    #     language="ko"
-    # )
-    # dprint(info.language, info.duration)
-    # for seg in segments:
-    #     dprint(f"[{seg.start:.2f} → {seg.end:.2f}] {seg.text}")
-
-    # # 4) 결과 합치기
-    # text = "".join(seg.text for seg in segments).strip()
-
-    # result = pipe(
-    #     audio,
-    #     generate_kwargs={"language":"korean"}
-    # )
-    result = asr_model.transcribe(audio)
-    text = re.sub(r"<\|.*?\|>", "", result[0].text).strip()
-    # text = result[0].get("text", '---')
-    
-    return text
 
 # 3) relay_openai_to_client 수정본
 async def relay_openai_to_client(sess: Session, client_ws: WebSocket):

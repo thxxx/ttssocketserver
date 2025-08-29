@@ -180,19 +180,16 @@ async def ws_endpoint(ws: WebSocket):
 
                                     sess.end_scripting_time = time.time()
                                     await translate_next(sess, transcript)
-                            
                             else:
                                 dprint("audio None")
                     except Exception as e:
                      dprint("Error : ", e)
+                
                 # 3) 커밋 신호 전달 (chunk 경계)
                 elif t == "input_audio_buffer.commit":
                     lprint("input_audio_buffer.commit")
                     sess.end_audio_input_time = time.time()
                     sess.end_tts_time = 0
-                    
-                    # 지금까지 누적된 PCM을 Whisper에 태워서 script 추출
-                    # buf = bytes(sess.audios)
 
                     # 비동기 실행 (블로킹 피함)
                     transcript = await transcribe_pcm(audios=sess.audios)
@@ -313,7 +310,6 @@ async def translate_next(sess: Session, final_text: str):
         # 다음 문장 누적용 버퍼 비우기
         sess.current_transcript = ""
         sess.current_translated = ""
-
 
 async def teardown_session(sess: Session):
     sess.running = False

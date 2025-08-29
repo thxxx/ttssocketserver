@@ -1,7 +1,7 @@
 import asyncio
 import json
 from typing import Dict, Optional
-from llm.openai import translate
+from llm.openai import translate, translate_simple
 from stt.openai import open_openai_ws
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
@@ -16,7 +16,9 @@ import numpy as np
 import librosa
 # Load model directly
 import torch
-from stt.asr import load_asr_backend, WHISPER_SR
+from stt.asr import load_asr_backend
+from stt.vad import check_audio_state
+from utils.process import process_data_to_audio
 
 DEBUG = True
 def dprint(*a, **k): 
@@ -33,22 +35,14 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
 VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "wj5ree7FcgKDPFphpPWQ")
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
+ELEVENLABS_API_KEY = "sk_fa0a877d7e397e9f179e0efc3296557f2a0dfc5e9c467f0a"
 
 app = FastAPI()
 
-ASR = load_asr_backend(kind=os.getenv("ASR_BACKEND", "hf"))
+ASR = load_asr_backend(kind="korean")
 
 INPUT_SAMPLE_RATE = 24000
-INPUT_FRAME_MS = 32
-
 WHISPER_SR = 16000
-SAMPLE_RATE_FOR_VAD = 16000
-SAMPLES_PER_FRAME = SAMPLE_RATE_FOR_VAD * INPUT_FRAME_MS // 1000
-
-# Silero VAD 로드 (CPU OK)
-silero, utils = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
-(get_speech_timestamps, _, read_audio, VADIterator, collect_chunks) = utils
-vad_iter = VADIterator(silero, threshold=0.35, sampling_rate=SAMPLE_RATE_FOR_VAD, min_silence_duration_ms=150)
 
 # 클라이언트 1명당 OpenAI Realtime WS를 하나씩 유지하기 위한 세션 상태
 class Session:
@@ -99,20 +93,21 @@ class Session:
         self.stt_output_token_count = 0
 
         self.is_network_logging = False
+        self.current_audio_sate = "none"
 
         self.new_speech_start = 0
 
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
 
-async def transcribe_pcm_generic(pcm_bytes: bytes, sample_rate: int, channels: int) -> str:
-    if not pcm_bytes:
+async def transcribe_pcm_generic(audios, sample_rate: int, channels: int) -> str:
+    if not audios:
         return ""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        None, lambda: ASR.transcribe_pcm(pcm_bytes, sample_rate, channels, language="korean")
+        None, lambda: ASR.transcribe_pcm(audios, sample_rate, channels, language="korean")
     )
 
-@app.websocket("/speakerws")
+@app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     sess = Session()
@@ -152,14 +147,14 @@ async def ws_endpoint(ws: WebSocket):
                         sess.connection_start_time = time.time()
                         
                         try:
-                            sess.tts_task = asyncio.create_task(
-                                elevenlabs_streamer(
-                                    sess,
-                                    voice_id=VOICE_ID,
-                                    api_key=ELEVENLABS_API_KEY,
-                                    output_format="mp3_22050_32"
-                                )
-                            )
+                            # sess.tts_task = asyncio.create_task(
+                            #     elevenlabs_streamer(
+                            #         sess,
+                            #         voice_id=VOICE_ID,
+                            #         api_key=ELEVENLABS_API_KEY,
+                            #         output_format="mp3_22050_32"
+                            #     )
+                            # )
     
                             # OpenAI 이벤트를 client로 릴레이하는 백그라운드 태스크
                             await ws.send_text(jdumps({"type": "scriptsession.started"}))
@@ -170,63 +165,79 @@ async def ws_endpoint(ws: WebSocket):
 
                 # 2) 오디오 append → Open AI로 그대로 전달
                 elif t == "input_audio_buffer.append":
-                    if sess.is_network_logging:
-                        t1 = int(time.time() * 1000)   # server recv
-                        t0 = data.get("t0")  # client send(ms)
-                        await ws.send_text(jdumps({
-                            "type": "audio.recv.ack",
-                            "t0": t0,
-                            "t1": t1
-                        }))
-                    
-                    # 한 5개 쌓일때마다 한번씩?
-                    sess.buf_count += 1
-                    if sess.buf_count % 5 == 4:
-                        # 지금까지 누적된 PCM을 Whisper에 태워서 script 추출
-                        buf = bytes(sess.audio_buf)
-                        sess.audio_buf.clear()  # 다음 청크 대비 비우기
+                    try:
+                        aud = data.get("audio")
+                        if aud:
+                            audio = process_data_to_audio(aud, input_sample_rate=INPUT_SAMPLE_RATE, whisper_sr=WHISPER_SR)
+                            if audio is None:
+                                dprint("[NO AUDIO]")
+                                continue
+                            
+                            sess.audios = np.concatenate([sess.audios, audio])
+                            sess.buf_count += 1
 
-                        # 비동기 실행 (블로킹 피함)
-                        t00 = time.time()
-                        transcript = await transcribe_pcm_with_whisper(
-                            pcm_bytes=buf,
-                            sample_rate=sess.input_sample_rate,
-                            channels=sess.input_channels
-                        )
-                        dprint(f"[{time.time() - t00:.2f}s] scripting : ", transcript)
-                    
-                    a = data.get("audio")
-                    if a:
-                        if isinstance(a, dict) and "data" in a:
-                            sess.audio_buf.extend(bytes(a["data"]))  # int 배열 → bytes
-                        elif isinstance(a, str):
-                            # 혹시 base64 문자열로 올 경우
-                            sess.audio_buf.extend(base64.b64decode(a))
+                            # === 그냥 1초 단위로 해보자 ===
+                            if sess.buf_count%16==15 and sess.current_audio_sate == "start":
+                                st = time.time()
+                                pcm_bytes = (np.clip(sess.audios, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+                                transcript = await transcribe_pcm_generic(
+                                    audios=pcm_bytes,
+                                    sample_rate=16000,
+                                    channels=sess.input_channels
+                                )
+                                dprint(f"[WHILE {time.time() - st:.2f}s] - {transcript}\n")
+                                await sess.out_q.put(jdumps({
+                                    "type": "delta", "text": transcript, "final": False
+                                }))
+                                sess.buf_count = 0
+                            
+                            # === 여기서 VAD 검사 ===
+                            vads = time.time()
+                            vad_event = check_audio_state(audio)
 
-                # 3) 커밋 신호 전달 (chunk 경계)
+                            if vad_event == "start":
+                                sess.current_audio_sate = "start"
+                                continue
+                            if vad_event == "end" and transcript != "":
+                                # 이때까지 자동으로 script 따던게 있을테니 그걸 리턴한다.
+                                print("END - ", transcript)
+                                await sess.out_q.put(jdumps({
+                                    "type": "transcript", "text": transcript, "final": True
+                                }))
+                                sess.current_audio_sate = "none"
+                                sess.audios = np.empty(0, dtype=np.float32)
+                                
+                                await translate_next(sess, transcript)
+                                transcript = ""
+                                continue
+                            
+                            if vad_event == "end" and sess.audios.size>WHISPER_SR*1.5:
+                                target_audios = sess.audios
+                                sess.audios = np.empty(0, dtype=np.float32)
+                                
+                                t00 = time.time()
+                                pcm_bytes = (np.clip(target_audios, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+                                transcript = await transcribe_pcm_generic(
+                                    audios=pcm_bytes,
+                                    sample_rate=16000,
+                                    channels=sess.input_channels
+                                )
+                                dprint(f"[SCRIPT {time.time() - t00:.2f}s] - {transcript}\n")
+
+                                # 클라이언트로 최종 전사 전송
+                                await sess.out_q.put(jdumps({
+                                    "type": "transcript", "text": transcript, "final": True
+                                }))
+
+                                sess.end_scripting_time = time.time()
+                                # await translate_next(sess, transcript)
+                                
+                    except Exception as e:
+                     dprint("Error : ", e)
+                
+                # 3) 커밋 신호 전달 (chunk 경계) = 현재 세팅에서는 VAD를 여기서 검사하기 때문에, 들어올일이 없다.
                 elif t == "input_audio_buffer.commit":
                     lprint("input_audio_buffer.commit")
-                    sess.end_audio_input_time = time.time()
-                    sess.end_tts_time = 0
-                    
-                    # 지금까지 누적된 PCM을 Whisper에 태워서 script 추출
-                    buf = bytes(sess.audio_buf)
-                    sess.audio_buf.clear()  # 다음 청크 대비 비우기
-
-                    # 비동기 실행 (블로킹 피함)
-                    transcript = await transcribe_pcm_with_whisper(
-                        pcm_bytes=buf,
-                        sample_rate=sess.input_sample_rate,
-                        channels=sess.input_channels
-                    )
-                    dprint("Transcript : ", transcript)
-
-                    # 클라이언트로 최종 전사 전송
-                    await ws.send_text(jdumps({
-                        "type": "transcript",
-                        "text": transcript,
-                        "final": True
-                    }))
                     continue
 
                 elif t == "test":
@@ -241,7 +252,6 @@ async def ws_endpoint(ws: WebSocket):
                         "llm_cached_token_count": sess.llm_cached_token_count,
                         "llm_input_token_count": sess.llm_input_token_count,
                         "llm_output_token_count": sess.llm_output_token_count,
-                        "tts_output_token_count": sess.tts_output_token_count,
                     }))
                     break
 
@@ -263,7 +273,50 @@ async def ws_endpoint(ws: WebSocket):
         await teardown_session(sess)
         sessions.pop(id(ws), None)
 
-# 3) relay_openai_to_client 수정본
+async def translate_next(sess: Session, final_text: str):
+    if sess.current_transcript:
+        sess.current_transcript += " " + final_text
+    else:
+        sess.current_transcript = final_text
+    
+    # 너무 짧은 문장이나 단어는 굳이 바로 번역하지 않기.
+    if len(sess.current_transcript)<6 or set(final_text) == " ":
+        return
+    
+    # dprint("\nprevScripts", sess.transcripts[-5:])
+    # dprint("current_scripted_sentence", sess.current_transcript)
+    # dprint("current_translated", sess.current_translated)
+
+    # run_translate_async안에서 바로 결과를 client에게 보낸다.
+    st = time.time()
+    translated_text = await run_translate_async(sess)
+    
+    print(f"[Translate {time.time() - st:.2f}s] - {translated_text}")
+    sess.current_transcript = ""
+    return
+
+    translated_text = translated_text.replace("<SKIP>", "")
+    translated_text = translated_text.replace("...", "")
+    if translated_text == "" or translated_text is None:
+        return
+
+    # 3-5) 누적 번역 업데이트
+    if sess.current_translated and "<CORRECTED>" not in translated_text:
+        sess.current_translated += " " + translated_text
+    else:
+        sess.current_translated = translated_text
+
+    # 3-6) 문장 종료(<END>) 처리. client 단과 액션을 맞춰야함.
+    if "<END>" in translated_text:
+        translated_text = translated_text.replace("<END>", "").strip()
+
+        sess.transcripts.append(sess.current_transcript)
+        sess.translateds.append(translated_text)
+
+        # 다음 문장 누적용 버퍼 비우기
+        sess.current_transcript = ""
+        sess.current_translated = ""
+
 async def relay_openai_to_client(sess: Session, client_ws: WebSocket):
     try:
         async for raw in sess.oai_ws:
@@ -398,7 +451,7 @@ async def run_translate_async(sess: Session) -> str:
         chunk = "".join(sess.tts_buf).strip()
         chunk = re.sub(r"<[^>]*>", "", chunk)
 
-        dprint("[flush_tts_chunk] ", repr(chunk))
+        # dprint("[flush_tts_chunk] ", repr(chunk))
         sess.tts_buf.clear()
         try:
             # sess.tts_in_q.put_nowait(chunk) # 마지막 청크
@@ -433,7 +486,7 @@ async def run_translate_async(sess: Session) -> str:
 
     def run_blocking():
         # 동기 translate 호출
-        return translate(
+        return translate_simple(
             prevScripts=sess.transcripts[-5:],
             current_scripted_sentence=sess.current_transcript,
             current_translated=sess.current_translated,
@@ -443,12 +496,12 @@ async def run_translate_async(sess: Session) -> str:
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
     output = await loop.run_in_executor(None, run_blocking)
-    dprint("llm output : ", output)
+    
     final_text = output.get("text", "")
     if final_text == "":
         dprint("No translated text")
         return ''
-    dprint("final_text : ", final_text)
+    
     sess.llm_cached_token_count += output["prompt_tokens_cached"]
     sess.llm_input_token_count += output["prompt_tokens"]
     sess.llm_output_token_count += output["completion_tokens"]

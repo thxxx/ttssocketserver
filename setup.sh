@@ -13,3 +13,4 @@ git config user.name thxxx
 pip install -U nemo_toolkit['asr']
 
 # uvicorn server:app --host 0.0.0.0 --port 5000
+
