@@ -28,7 +28,6 @@ from stt.vad import check_audio_state
 from utils.process import process_data_to_audio
 from tts.zipvoice_infer import load_infer_context, generate_sentence
 from app.session import Session
-from app.session_control import teardown_session, outbound_sender
 
 # 모델 로드 (기본값 사용)
 ctx = load_infer_context()
@@ -91,7 +90,7 @@ async def transcribe_pcm_generic(audios, sample_rate: int, channels: int) -> str
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
-    sess = Session(input_sr=INPUT_SAMPLE_RATE, input_channels=1)
+    sess = Session()
     sessions[id(ws)] = sess
 
     sess.sender_task = asyncio.create_task(outbound_sender(sess, ws))
@@ -205,6 +204,27 @@ async def ws_endpoint(ws: WebSocket):
                                 await translate_next(sess, transcript)
                                 transcript = ""
                                 continue
+                            
+                            if vad_event == "end" and sess.audios.size>WHISPER_SR*1.5:
+                                target_audios = sess.audios
+                                sess.audios = np.empty(0, dtype=np.float32)
+                                
+                                t00 = time.time()
+                                pcm_bytes = (np.clip(target_audios, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+                                transcript = await transcribe_pcm_generic(
+                                    audios=pcm_bytes,
+                                    sample_rate=16000,
+                                    channels=sess.input_channels
+                                )
+                                dprint(f"[SCRIPT {time.time() - t00:.2f}s] - {transcript}\n")
+
+                                # 클라이언트로 최종 전사 전송
+                                await sess.out_q.put(jdumps({
+                                    "type": "transcript", "text": transcript, "final": True
+                                }))
+
+                                sess.end_scripting_time = time.time()
+                                # await translate_next(sess, transcript)
                                 
                     except Exception as e:
                      dprint("Error : ", e)
@@ -248,7 +268,10 @@ async def ws_endpoint(ws: WebSocket):
         sessions.pop(id(ws), None)
 
 async def translate_next(sess: Session, final_text: str):
-    sess.current_transcript = sess.current_transcript + " " + final_text if sess.current_transcript else final_text
+    if sess.current_transcript:
+        sess.current_transcript += " " + final_text
+    else:
+        sess.current_transcript = final_text
     
     # 너무 짧은 문장이나 단어는 굳이 바로 번역하지 않기.
     if len(sess.current_transcript)<6 or final_text.strip() == "":
@@ -284,6 +307,36 @@ async def translate_next(sess: Session, final_text: str):
         sess.current_transcript = ""
         sess.current_translated = ""
 
+async def teardown_session(sess: Session):
+    sess.running = False
+
+    tasks = [sess.tts_task, sess.oai_task, sess.sender_task]
+    # 1) 모두 취소
+    for t in tasks:
+        if t and not t.done():
+            t.cancel()
+    for t in tasks:
+        if t:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
+    if sess.oai_ws:
+        with contextlib.suppress(Exception):
+            await sess.oai_ws.close()
+    if sess.tts_ws:
+        with contextlib.suppress(Exception):
+            if sess.tts_ws.open:
+                await sess.tts_ws.send(jdumps({"text": ""}))  # EOS
+            await sess.tts_ws.wait_closed()
+        sess.tts_ws = None
+
+async def outbound_sender(sess: Session, client_ws: WebSocket):
+    try:
+        while sess.running:
+            msg = await sess.out_q.get()
+            await client_ws.send_text(msg)
+    except Exception:
+        pass
+
 # --- 추가: 동기 translate를 스레드에서 돌리고, 콜백은 루프-세이프로 브리지 ---
 async def run_translate_async(sess: Session) -> str:
     """
@@ -304,6 +357,14 @@ async def run_translate_async(sess: Session) -> str:
         dprint("[flush_tts_chunk] ", repr(chunk))
         sess.tts_buf.clear()
         try:
+            # sess.tts_in_q.put_nowait(chunk) # 마지막 청크
+            # chunks = chunk.split(" ")
+            # for i in range(0, len(chunks), 3):
+            #     if i >= len(chunks) - 4:
+            #         sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
+            #         break
+            #     else:
+            #         sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3]) + " ") # 기본적으로는 단어를 3개씩 끊어서 보내기
             sess.tts_in_q.put_nowait(chunk) # 기본적으로는 단어를 3개씩 끊어서 보내기
         except asyncio.QueueFull:
             dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")

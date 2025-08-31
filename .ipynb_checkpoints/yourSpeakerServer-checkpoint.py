@@ -56,7 +56,7 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
 app = FastAPI()
 
-ASR = load_asr_backend(kind="korean")
+ASR = load_asr_backend(kind="nemo")
 LLM = None
 
 INPUT_SAMPLE_RATE = 24000
@@ -88,7 +88,7 @@ async def transcribe_pcm_generic(audios, sample_rate: int, channels: int) -> str
         None, lambda: ASR.transcribe_pcm(audios, sample_rate, channels, language="korean")
     )
 
-@app.websocket("/ws")
+@app.websocket("/speakerws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     sess = Session(input_sr=INPUT_SAMPLE_RATE, input_channels=1)
@@ -330,7 +330,7 @@ async def run_translate_async(sess: Session) -> str:
 
     def run_blocking():
         # 동기 translate 호출
-        return LLM.translate(sess.current_transcript, target="en")
+        return LLM.translate(sess.current_transcript, target="ko")
         # return translate_simple(
         #     prevScripts=sess.transcripts[-5:],
         #     current_scripted_sentence=sess.current_transcript,

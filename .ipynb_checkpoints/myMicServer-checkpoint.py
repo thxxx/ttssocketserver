@@ -1,32 +1,6 @@
 # --- MUST be at the very top (before any vllm/torch import) ---
+import app.boot
 import os, socket, multiprocessing as mp
-
-# 1) multiprocessing & vLLM spawn
-os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-try:
-    mp.set_start_method("spawn", force=True)
-except RuntimeError:
-    pass
-
-# 2) single GPU & stable dist defaults
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
-
-# 3) avoid MASTER_PORT collisions on reload/restarts
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-os.environ["MASTER_ADDR"] = "127.0.0.1"
-os.environ["MASTER_PORT"] = str(_free_port())
-
-# (옵션) NCCL 이슈 회피: 단일 GPU면 괜찮지만, 도커/IB 환경이면 아래도 도움됨
-os.environ.setdefault("NCCL_P2P_DISABLE", "1")
-os.environ.setdefault("NCCL_IB_DISABLE", "1")
-os.environ.setdefault("NCCL_BLOCKING_WAIT", "1")
-# ---------------------------------------------------------------
-
 import asyncio
 import json
 from typing import Dict, Optional
@@ -53,6 +27,8 @@ from stt.asr import load_asr_backend
 from stt.vad import check_audio_state
 from utils.process import process_data_to_audio
 from tts.zipvoice_infer import load_infer_context, generate_sentence
+from app.session import Session
+from app.session_control import teardown_session, outbound_sender
 
 # 모델 로드 (기본값 사용)
 ctx = load_infer_context()
@@ -82,7 +58,6 @@ app = FastAPI()
 
 ASR = load_asr_backend(kind="korean")
 LLM = None
-# LLM = load_llm()
 
 INPUT_SAMPLE_RATE = 24000
 WHISPER_SR = 16000
@@ -103,59 +78,6 @@ def init_models():
     if LLM is None:
         LLM = load_llm()
 
-# 클라이언트 1명당 OpenAI Realtime WS를 하나씩 유지하기 위한 세션 상태
-class Session:
-    def __init__(self):
-        self.oai_ws = None  # OpenAI WS 연결
-        self.oai_task: Optional[asyncio.Task] = None  # OAI -> Client listener task
-        self.running = True
-
-        # 오디오 누적 버퍼 (commit 시점에만 소비)
-        self.audio_buf = bytearray()
-        self.audios = np.empty(0, dtype=np.float32)
-        
-        self.input_sample_rate = INPUT_SAMPLE_RATE
-        self.input_channels = 1
-
-        self.current_transcript: str = ''
-        self.transcripts: list[str] = []
-        self.current_translated: str = ''
-        self.translateds: list[str] = []
-
-        # 송신을 Queue로 관리
-        self.out_q: asyncio.Queue[str] = asyncio.Queue()
-        self.sender_task: Optional[asyncio.Task] = None
-
-        # --- TTS용 필드, text buffer 단위 speech 생성 ---
-        self.tts_ws = None
-        self.tts_task: Optional[asyncio.Task] = None
-        self.tts_in_q: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
-
-        # onToken에서 단어/프레이즈 coalescing용
-        self.tts_buf: list[str] = []
-        self.tts_debounce_task: Optional[asyncio.Task] = None
-        self.buf_count = 0
-
-        # variables for logging
-        self.start_scripting_time = 0
-        self.end_scripting_time = 0
-        self.end_translation_time = 0
-        self.first_translated_token_output_time = 0
-        self.end_tts_time = 0
-        self.end_audio_input_time = 0
-
-        # time logging
-        self.connection_start_time = 0
-        self.llm_cached_token_count = 0
-        self.llm_input_token_count = 0
-        self.llm_output_token_count = 0
-        self.stt_output_token_count = 0
-
-        self.is_network_logging = False
-        self.current_audio_sate = "none"
-
-        self.new_speech_start = 0
-
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
 
 async def transcribe_pcm_generic(audios, sample_rate: int, channels: int) -> str:
@@ -169,7 +91,7 @@ async def transcribe_pcm_generic(audios, sample_rate: int, channels: int) -> str
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
-    sess = Session()
+    sess = Session(input_sr=INPUT_SAMPLE_RATE, input_channels=1)
     sessions[id(ws)] = sess
 
     sess.sender_task = asyncio.create_task(outbound_sender(sess, ws))
@@ -206,13 +128,13 @@ async def ws_endpoint(ws: WebSocket):
                         sess.connection_start_time = time.time()
                         
                         try:
-                            sess.tts_task = asyncio.create_task(
-                                zipvoice_streamer(
-                                    sess,
-                                    prompt_text=ZIP_PROMPT_TEXT,
-                                    prompt_wav_path=ZIP_PROMPT_WAV_PATH,
-                                )
-                            )
+                            # sess.tts_task = asyncio.create_task(
+                            #     zipvoice_streamer(
+                            #         sess,
+                            #         prompt_text=ZIP_PROMPT_TEXT,
+                            #         prompt_wav_path=ZIP_PROMPT_WAV_PATH,
+                            #     )
+                            # )
     
                             # OpenAI 이벤트를 client로 릴레이하는 백그라운드 태스크
                             await ws.send_text(jdumps({"type": "scriptsession.started"}))
@@ -249,6 +171,19 @@ async def ws_endpoint(ws: WebSocket):
                                     "type": "delta", "text": transcript, "final": False
                                 }))
                                 sess.buf_count = 0
+
+                                # 말이 안끊기고 너무 길면 중간에 임의로 끊는게 목적
+                                if len(transcript) > 50 and transcript[-1] in [".", "?", "!", ","]:
+                                    print("MIDDLE STOP - ", transcript)
+                                    await sess.out_q.put(jdumps({
+                                        "type": "transcript", "text": transcript, "final": True
+                                    }))
+                                    sess.current_audio_sate = "none"
+                                    sess.audios = np.empty(0, dtype=np.float32)
+                                    
+                                    await translate_next(sess, transcript)
+                                    transcript = ""
+                                    continue
                             
                             # === 여기서 VAD 검사 ===
                             vads = time.time()
@@ -257,6 +192,7 @@ async def ws_endpoint(ws: WebSocket):
                             if vad_event == "start":
                                 sess.current_audio_sate = "start"
                                 continue
+                            
                             if vad_event == "end" and transcript != "":
                                 # 이때까지 자동으로 script 따던게 있을테니 그걸 리턴한다.
                                 print("END - ", transcript)
@@ -269,27 +205,6 @@ async def ws_endpoint(ws: WebSocket):
                                 await translate_next(sess, transcript)
                                 transcript = ""
                                 continue
-                            
-                            if vad_event == "end" and sess.audios.size>WHISPER_SR*1.5:
-                                target_audios = sess.audios
-                                sess.audios = np.empty(0, dtype=np.float32)
-                                
-                                t00 = time.time()
-                                pcm_bytes = (np.clip(target_audios, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
-                                transcript = await transcribe_pcm_generic(
-                                    audios=pcm_bytes,
-                                    sample_rate=16000,
-                                    channels=sess.input_channels
-                                )
-                                dprint(f"[SCRIPT {time.time() - t00:.2f}s] - {transcript}\n")
-
-                                # 클라이언트로 최종 전사 전송
-                                await sess.out_q.put(jdumps({
-                                    "type": "transcript", "text": transcript, "final": True
-                                }))
-
-                                sess.end_scripting_time = time.time()
-                                # await translate_next(sess, transcript)
                                 
                     except Exception as e:
                      dprint("Error : ", e)
@@ -333,10 +248,7 @@ async def ws_endpoint(ws: WebSocket):
         sessions.pop(id(ws), None)
 
 async def translate_next(sess: Session, final_text: str):
-    if sess.current_transcript:
-        sess.current_transcript += " " + final_text
-    else:
-        sess.current_transcript = final_text
+    sess.current_transcript = sess.current_transcript + " " + final_text if sess.current_transcript else final_text
     
     # 너무 짧은 문장이나 단어는 굳이 바로 번역하지 않기.
     if len(sess.current_transcript)<6 or final_text.strip() == "":
@@ -372,36 +284,6 @@ async def translate_next(sess: Session, final_text: str):
         sess.current_transcript = ""
         sess.current_translated = ""
 
-async def teardown_session(sess: Session):
-    sess.running = False
-
-    tasks = [sess.tts_task, sess.oai_task, sess.sender_task]
-    # 1) 모두 취소
-    for t in tasks:
-        if t and not t.done():
-            t.cancel()
-    for t in tasks:
-        if t:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await t
-    if sess.oai_ws:
-        with contextlib.suppress(Exception):
-            await sess.oai_ws.close()
-    if sess.tts_ws:
-        with contextlib.suppress(Exception):
-            if sess.tts_ws.open:
-                await sess.tts_ws.send(jdumps({"text": ""}))  # EOS
-            await sess.tts_ws.wait_closed()
-        sess.tts_ws = None
-
-async def outbound_sender(sess: Session, client_ws: WebSocket):
-    try:
-        while sess.running:
-            msg = await sess.out_q.get()
-            await client_ws.send_text(msg)
-    except Exception:
-        pass
-
 # --- 추가: 동기 translate를 스레드에서 돌리고, 콜백은 루프-세이프로 브리지 ---
 async def run_translate_async(sess: Session) -> str:
     """
@@ -422,14 +304,6 @@ async def run_translate_async(sess: Session) -> str:
         dprint("[flush_tts_chunk] ", repr(chunk))
         sess.tts_buf.clear()
         try:
-            # sess.tts_in_q.put_nowait(chunk) # 마지막 청크
-            # chunks = chunk.split(" ")
-            # for i in range(0, len(chunks), 3):
-            #     if i >= len(chunks) - 4:
-            #         sess.tts_in_q.put_nowait(" ".join(chunks[i:])) # 마지막 청크
-            #         break
-            #     else:
-            #         sess.tts_in_q.put_nowait(" ".join(chunks[i:i+3]) + " ") # 기본적으로는 단어를 3개씩 끊어서 보내기
             sess.tts_in_q.put_nowait(chunk) # 기본적으로는 단어를 3개씩 끊어서 보내기
         except asyncio.QueueFull:
             dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
@@ -456,13 +330,13 @@ async def run_translate_async(sess: Session) -> str:
 
     def run_blocking():
         # 동기 translate 호출
-        # return LLM.translate(sess.current_transcript)
-        return translate_simple(
-            prevScripts=sess.transcripts[-5:],
-            current_scripted_sentence=sess.current_transcript,
-            current_translated=sess.current_translated,
-            onToken=on_token,
-        )
+        return LLM.translate(sess.current_transcript, target="en")
+        # return translate_simple(
+        #     prevScripts=sess.transcripts[-5:],
+        #     current_scripted_sentence=sess.current_transcript,
+        #     current_translated=sess.current_translated,
+        #     onToken=on_token,
+        # )
 
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
@@ -486,10 +360,10 @@ async def run_translate_async(sess: Session) -> str:
         flush_tts_chunk()
 
     loop.call_soon_threadsafe(_final_flush)
-    await sess.tts_in_q.put(final_text)
+    # await sess.tts_in_q.put(final_text)
 
     # 최종 결과 알림
-    await sess.out_q.put(jdumps({"type": "translated", "text": final_text}))
+    await sess.out_q.put(jdumps({"type": "translated", "text": final_text + "<END>"}))
     return final_text
 
 @torch.inference_mode()

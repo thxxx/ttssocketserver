@@ -5,25 +5,26 @@ import re
 import numpy as np
 import librosa
 import torch
+import tqdm
+
 # 선택적 의존성 (사용 시에만 import)
 try:
     import nemo.collections.asr as nemo_asr  # type: ignore
 except Exception:
     nemo_asr = None
-
 try:
     from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq  # type: ignore
 except Exception:
     AutoProcessor = AutoModelForSpeechSeq2Seq = pipeline = None
-
 try:
     from transformers import pipeline
 except Exception as e:
     raise RuntimeError("transformers pipeline is not installed (import failed).") from e
 
-import os
 os.environ.setdefault("TRANSFORMERS_NO_TORCHVISION", "1")
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
+tqdm.tqdm = lambda *a, **k: a[0] if a else None
 
 WHISPER_SR = 16000
 
