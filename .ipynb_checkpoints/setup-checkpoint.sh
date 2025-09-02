@@ -16,7 +16,6 @@ pip install -U nemo_toolkit['asr']
 
 pip install --find-links https://k2-fsa.github.io/icefall/piper_phonemize.html
 pip install torchaudio numpy lhotse huggingface_hub safetensors tensorboard vocos
-
 pip install cn2an inflect
 
 # Tokenization

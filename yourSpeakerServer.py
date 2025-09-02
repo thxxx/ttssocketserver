@@ -26,6 +26,7 @@ import math
 from stt.asr import load_asr_backend
 from stt.vad import check_audio_state
 from utils.process import process_data_to_audio
+from utils.text_process import TranscriptStabilizer
 from tts.zipvoice_infer import load_infer_context, generate_sentence
 from app.session import Session
 from app.session_control import teardown_session, outbound_sender
@@ -40,6 +41,8 @@ ZIP_PROMPT_TEXT = os.environ.get(
     "ZIPVOICE_PROMPT_TEXT",
     "Please limit your phone booth usage to 1 hour. and do not leave your belongings unattended for your neighborhoods.",
 )
+
+stab = TranscriptStabilizer(replace_last_n=2, min_append_tokens=1)
 
 DEBUG = True
 def dprint(*a, **k): 
@@ -166,24 +169,21 @@ async def ws_endpoint(ws: WebSocket):
                                     sample_rate=16000,
                                     channels=sess.input_channels
                                 )
-                                # dprint(f"[WHILE {time.time() - st:.2f}s] - {transcript}\n")
-                                await sess.out_q.put(jdumps({
-                                    "type": "delta", "text": transcript, "final": False
-                                }))
-                                sess.buf_count = 0
+                                await sess.out_q.put(jdumps({"type": "delta", "text": transcript, "is_final": False}))
+                                if sess.buf_count%16*3==16*3-1:
+                                    print("\n\n임의 번역 호출\n\n")
+                                    await translate_next(sess, transcript, is_final=False)
+                                    sess.buf_count = 0
 
-                                # 말이 안끊기고 너무 길면 중간에 임의로 끊는게 목적
-                                if len(transcript) > 50 and transcript[-1] in [".", "?", "!", ","]:
-                                    print("MIDDLE STOP - ", transcript)
-                                    await sess.out_q.put(jdumps({
-                                        "type": "transcript", "text": transcript, "final": True
-                                    }))
-                                    sess.current_audio_sate = "none"
-                                    sess.audios = np.empty(0, dtype=np.float32)
+                                # # 말이 안끊기고 너무 길면 중간에 임의로 끊는게 목적
+                                # if len(transcript) > 50 and transcript[-1] in [".", "?", "!", ","]:
+                                #     print("\n\ncall stop\n\n")
+                                #     sess.audios = np.empty(0, dtype=np.float32)
+                                #     await sess.out_q.put(jdumps({"type": "transcript", "text": transcript, "is_final": True}))
                                     
-                                    await translate_next(sess, transcript)
-                                    transcript = ""
-                                    continue
+                                #     await translate_next(sess, transcript, is_final=True)
+                                #     transcript = ""
+                                #     continue
                             
                             # === 여기서 VAD 검사 ===
                             vads = time.time()
@@ -193,16 +193,14 @@ async def ws_endpoint(ws: WebSocket):
                                 sess.current_audio_sate = "start"
                                 continue
                             
-                            if vad_event == "end" and transcript != "":
+                            if vad_event == "end" and transcript != "" and transcript[-1] in [".", "?", "!", ","] or len(transcript)>300:
                                 # 이때까지 자동으로 script 따던게 있을테니 그걸 리턴한다.
                                 print("END - ", transcript)
-                                await sess.out_q.put(jdumps({
-                                    "type": "transcript", "text": transcript, "final": True
-                                }))
                                 sess.current_audio_sate = "none"
                                 sess.audios = np.empty(0, dtype=np.float32)
+                                await sess.out_q.put(jdumps({"type": "transcript", "text": transcript, "is_final": True}))
                                 
-                                await translate_next(sess, transcript)
+                                await translate_next(sess, transcript, is_final=True)
                                 transcript = ""
                                 continue
                                 
@@ -247,7 +245,7 @@ async def ws_endpoint(ws: WebSocket):
         await teardown_session(sess)
         sessions.pop(id(ws), None)
 
-async def translate_next(sess: Session, final_text: str):
+async def translate_next(sess: Session, final_text: str, is_final=True):
     sess.current_transcript = sess.current_transcript + " " + final_text if sess.current_transcript else final_text
     
     # 너무 짧은 문장이나 단어는 굳이 바로 번역하지 않기.
@@ -256,7 +254,7 @@ async def translate_next(sess: Session, final_text: str):
 
     # run_translate_async안에서 바로 결과를 client에게 보낸다.
     st = time.time()
-    translated_text = await run_translate_async(sess)
+    translated_text = await run_translate_async(sess, is_final)
     
     print(f"[Translate {time.time() - st:.2f}s] - {translated_text}")
     sess.current_transcript = ""
@@ -285,7 +283,7 @@ async def translate_next(sess: Session, final_text: str):
         sess.current_translated = ""
 
 # --- 추가: 동기 translate를 스레드에서 돌리고, 콜백은 루프-세이프로 브리지 ---
-async def run_translate_async(sess: Session) -> str:
+async def run_translate_async(sess: Session, is_final=True) -> str:
     """
     sess.current_transcript, sess.current_translated, sess.transcripts[-5:]
     를 사용해서 동기 translate를 스레드에서 실행.
@@ -360,10 +358,10 @@ async def run_translate_async(sess: Session) -> str:
         flush_tts_chunk()
 
     loop.call_soon_threadsafe(_final_flush)
-    # await sess.tts_in_q.put(final_text)
+    # await sess.tts_in_q.put(final_text) # This is for TTS generation
 
     # 최종 결과 알림
-    await sess.out_q.put(jdumps({"type": "translated", "text": final_text + "<END>"}))
+    await sess.out_q.put(jdumps({"type": "translated", "text": final_text + "<END>" if is_final else final_text, "is_final": is_final}))
     return final_text
 
 @torch.inference_mode()
