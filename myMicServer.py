@@ -270,52 +270,129 @@ async def translate_next(sess: Session, transcript: str):
         sess.current_transcript = ""
         sess.current_translated = ""
 
-# --- 추가: 동기 translate를 스레드에서 돌리고, 콜백은 루프-세이프로 브리지 ---
-async def run_translate_async(sess: Session) -> str:
-    """
-    sess.current_transcript, sess.current_translated, sess.transcripts[-5:]
-    를 사용해서 동기 translate를 스레드에서 실행.
-    onToken 콜백은 루프-세이프로 sess.out_q에 push.
-    최종 완성 문자열을 반환.
-    """
-    loop = asyncio.get_running_loop()
+# # --- 추가: 동기 translate를 스레드에서 돌리고, 콜백은 루프-세이프로 브리지 ---
+# async def run_translate_async(sess: Session) -> str:
+#     """
+#     sess.current_transcript, sess.current_translated, sess.transcripts[-5:]
+#     를 사용해서 동기 translate를 스레드에서 실행.
+#     onToken 콜백은 루프-세이프로 sess.out_q에 push.
+#     최종 완성 문자열을 반환.
+#     """
+#     loop = asyncio.get_running_loop()
 
-    def flush_tts_chunk():
-        if not sess.tts_buf or len(sess.tts_buf) == 0:
-            return
+#     def flush_tts_chunk():
+#         if not sess.tts_buf or len(sess.tts_buf) == 0:
+#             return
         
-        chunk = "".join(sess.tts_buf).strip()
-        chunk = re.sub(r"<[^>]*>", "", chunk)
+#         chunk = "".join(sess.tts_buf).strip()
+#         chunk = re.sub(r"<[^>]*>", "", chunk)
 
-        dprint("[flush_tts_chunk] ", repr(chunk))
-        sess.tts_buf.clear()
-        try:
-            sess.tts_in_q.put_nowait(chunk) # 기본적으로는 단어를 3개씩 끊어서 보내기
-        except asyncio.QueueFull:
-            dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
+#         dprint("[flush_tts_chunk] ", repr(chunk))
+#         sess.tts_buf.clear()
+#         try:
+#             sess.tts_in_q.put_nowait(chunk) # 기본적으로는 단어를 3개씩 끊어서 보내기
+#         except asyncio.QueueFull:
+#             dprint("[flush_tts_chunk] WARN: tts_in_q full, dropping chunk")
 
-    async def debounce_flush(delay_ms: int = 110):
-        try:
-            await asyncio.sleep(delay_ms / 1000)
-            flush_tts_chunk()
-        except Exception as e:
-            dprint("[debounce_flush] WARN: debounce_flush cancelled", e)
+#     async def debounce_flush(delay_ms: int = 110):
+#         try:
+#             await asyncio.sleep(delay_ms / 1000)
+#             flush_tts_chunk()
+#         except Exception as e:
+#             dprint("[debounce_flush] WARN: debounce_flush cancelled", e)
+
+#     current_translated = ""
+#     def on_token(tok: str):
+#         current_translated += tok
+#         if tok[-1] == '.':
+#             sess.tts_in_q.put(current_translated)
+#             sess.out_q.put(jdumps({"type": "translated", "text": current_translated, "is_final": False}))
+#         # def _append_and_schedule():
+#         #     sess.tts_buf.append(tok)
+#         #     if sess.tts_debounce_task and not sess.tts_debounce_task.done():
+#         #         sess.tts_debounce_task.cancel()
+#         #     sess.tts_debounce_task = asyncio.create_task(debounce_flush(110))
+#         # loop.call_soon_threadsafe(_append_and_schedule)
+
+#     def run_blocking():
+#         # 동기 translate 호출
+#         return translate(
+#             prevScripts=sess.transcripts[-5:],
+#             current_scripted_sentence=sess.current_transcript,
+#             current_translated=sess.current_translated,
+#             onToken=on_token,
+#         )
+
+#     # 동기 작업을 thread로
+#     loop = asyncio.get_running_loop()
+#     output = await loop.run_in_executor(None, run_blocking)
+    
+#     translated_text = output.get("text", "")
+#     if translated_text == "":
+#         dprint("No translated text")
+#         return ''
+    
+#     # sess.llm_cached_token_count += output["prompt_tokens_cached"]
+#     # sess.llm_input_token_count += output["prompt_tokens"]
+#     # sess.llm_output_token_count += output["completion_tokens"]
+
+#     if sess.tts_debounce_task and not sess.tts_debounce_task.done():
+#         sess.tts_debounce_task.cancel()
+
+#     def _final_flush():
+#         if sess.tts_debounce_task and not sess.tts_debounce_task.done():
+#             sess.tts_debounce_task.cancel()
+#         flush_tts_chunk()
+
+#     loop.call_soon_threadsafe(_final_flush)
+#     await sess.tts_in_q.put(translated_text)
+
+#     # 최종 결과 알림
+#     await sess.out_q.put(jdumps({"type": "translated", "text": translated_text, "is_final": True}))
+#     return translated_text
+
+async def run_translate_async(sess: Session) -> str:
+    loop = asyncio.get_running_loop()
+    current_translated = ""
+    sent_chars = 0
+
+    def safe_push_tts(text: str):
+        # 스레드→루프 안전 (콜백에서만 사용)
+        def _f():
+            try:
+                sess.tts_in_q.put_nowait(text)
+            except asyncio.QueueFull:
+                pass
+        loop.call_soon_threadsafe(_f)
+
+    def safe_push_out(msg: dict):
+        def _f():
+            try:
+                sess.out_q.put_nowait(jdumps(msg))
+            except asyncio.QueueFull:
+                pass
+        loop.call_soon_threadsafe(_f)
+
+    def clean_text(text: str) -> str:
+        return re.sub(r"<[^>]*>", "", text)
+
 
     def on_token(tok: str):
-        return
-        # 다른 스레드에서 불릴 수 있으므로 루프 스레드로 래핑
-        if sess.first_translated_token_output_time == 0:
-            sess.first_translated_token_output_time = time.time()
+        nonlocal current_translated, sent_chars
+        if not tok:
+            return
+        current_translated += tok
 
-        def _append_and_schedule():
-            sess.tts_buf.append(tok)
-            if sess.tts_debounce_task and not sess.tts_debounce_task.done():
-                sess.tts_debounce_task.cancel()
-            sess.tts_debounce_task = asyncio.create_task(debounce_flush(110))
-        loop.call_soon_threadsafe(_append_and_schedule)
+        # 문장 경계에서만 스트림 전송
+        if tok.endswith(('.', '!', '?', '。', '！', '？')) and len(current_translated) > 6:
+            # 아직 안 보낸 구간만 전송
+            segment = clean_text(current_translated[sent_chars:]).strip()
+            if segment:
+                safe_push_tts(segment)
+                safe_push_out({"type": "translated", "text": current_translated, "is_final": False})
+                sent_chars = len(current_translated)
 
     def run_blocking():
-        # 동기 translate 호출
         return translate(
             prevScripts=sess.transcripts[-5:],
             current_scripted_sentence=sess.current_transcript,
@@ -323,31 +400,18 @@ async def run_translate_async(sess: Session) -> str:
             onToken=on_token,
         )
 
-    # 동기 작업을 thread로
-    loop = asyncio.get_running_loop()
     output = await loop.run_in_executor(None, run_blocking)
-    
-    translated_text = output.get("text", "")
+    translated_text = output.get("text", "") or ""
+
     if translated_text == "":
-        dprint("No translated text")
-        return ''
-    
-    # sess.llm_cached_token_count += output["prompt_tokens_cached"]
-    # sess.llm_input_token_count += output["prompt_tokens"]
-    # sess.llm_output_token_count += output["completion_tokens"]
+        return ""
+    # 끝났을 때, 아직 안 보낸 꼬리만 (있으면) 전송
+    tail = clean_text(translated_text[sent_chars:]).strip()
+    if len(tail) > 2:
+        await sess.tts_in_q.put(tail)
+        sent_chars = len(translated_text)
 
-    if sess.tts_debounce_task and not sess.tts_debounce_task.done():
-        sess.tts_debounce_task.cancel()
-
-    def _final_flush():
-        if sess.tts_debounce_task and not sess.tts_debounce_task.done():
-            sess.tts_debounce_task.cancel()
-        flush_tts_chunk()
-
-    loop.call_soon_threadsafe(_final_flush)
-    await sess.tts_in_q.put(translated_text)
-
-    # 최종 결과 알림
+    # 최종 알림은 중복 없이 한 번
     await sess.out_q.put(jdumps({"type": "translated", "text": translated_text, "is_final": True}))
     return translated_text
 

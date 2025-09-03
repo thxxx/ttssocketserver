@@ -59,7 +59,7 @@ def translate(prevScripts:str, current_scripted_sentence:str, current_translated
     hist = "\n".join([f" me:{x}," for x in prevScripts])
     
     response = client.chat.completions.create(
-        model='gpt-4.1-mini',  # 최신 경량 모델
+        model='gpt-4.1-nano',  # 최신 경량 모델
         messages=[
             {"role": "system", "content": "You are a professional translator specializing in [Korean] → [English] translation. Your job is to incrementally translate Korean speech as it comes in."},
             {"role": "user", "content": f"""
@@ -207,7 +207,7 @@ Only output the new translation. No explanations or additional text.
 <current translation> : {current_translated}
 """}
         ],
-        temperature=0.5,
+        temperature=0.1,
         user="k2e-translator-v1-hojinkhj6051230808",
         prompt_cache_key="k2e-translator-v1-hojinkhj6051230808",
         stream=True,
