@@ -4,7 +4,7 @@ import os, socket, multiprocessing as mp
 import asyncio
 import json
 from typing import Dict, Optional
-from llm.openai_test import translate_simple
+from llm.openai import translate, translate_simple, translate_speaker
 from llm.custom import load_llm
 from stt.openai import open_openai_ws
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -86,7 +86,7 @@ async def transcribe_pcm_generic(audios, sample_rate: int, channels: int) -> str
         return ""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        None, lambda: ASR.transcribe_pcm(audios, sample_rate, channels, language="english")
+        None, lambda: ASR.transcribe_pcm(audios, sample_rate, channels, language="korean")
     )
 
 @app.websocket("/speakerws")
@@ -156,10 +156,12 @@ async def ws_endpoint(ws: WebSocket):
                             
                             sess.audios = np.concatenate([sess.audios, audio])
                             sess.buf_count += 1
+                            sess.count_after_last_translation += 1
 
-                            # === 500ms마다 script ===
+                            # === 그냥 1초 단위로 해보자 ===
                             if sess.buf_count%16==15 and sess.current_audio_sate == "start":
-                                sess.audios = sess.audios[-16000*25:] # 최근 25초만. 최대가 30초
+                                st = time.time()
+                                sess.audios = sess.audios[-16000*25:]
                                 pcm_bytes = (np.clip(sess.audios, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
                                 
                                 newScript = await transcribe_pcm_generic(
@@ -171,43 +173,40 @@ async def ws_endpoint(ws: WebSocket):
                                 await sess.out_q.put(jdumps({"type": "delta", "text": sess.transcript, "is_final": False}))
 
                                 # 말이 안끊겼더라도 한 문장 단위를 뱉었다고 생각이 되면 일단 번역을 하도록 한다.
-                                if newScript[-1] == "." and newScript[-2] != "." and len(newScript)>2:
+                                if len(newScript)>2 and newScript[-1] in [".", "?", "!"] and newScript[-2] != "." and sess.count_after_last_translation>30:
+                                    print(f'[NEW script] - {newScript}')
                                     await translate_next(sess, sess.transcript, is_final=False)
-                                
-                                # if sess.buf_count%(16*4) == (16*4-1):
-                                #     print("\n임의 번역 호출\n")
-                                #     await translate_next(sess, sess.transcript, is_final=False)
-                                #     sess.buf_count = 0
+                                    sess.count_after_last_translation=0
     
-                                    # # 말이 안끊기고 너무 길면 중간에 임의로 끊는게 목적
-                                    # if len(sess.transcript) > 50 and sess.transcript[-1] in [".", "?", "!", ","]:
-                                    #     print("\n\ncall stop\n\n")
-                                    #     sess.audios = np.empty(0, dtype=np.float32)
-                                    #     await sess.out_q.put(jdumps({"type": "transcript", "text": sess.transcript, "is_final": True}))
-                                        
-                                    #     await translate_next(sess, sess.transcript, is_final=True)
-                                    #     sess.transcript = ""
-                                    #     continue
-                            
                             # === 여기서 VAD 검사 ===
                             vads = time.time()
                             vad_event = check_audio_state(audio)
 
                             if vad_event == "start":
                                 sess.current_audio_sate = "start"
+                                sess.end_count = -1
                                 continue
                             
-                            if vad_event == "end" and sess.transcript != "" and sess.transcript[-1] in [".", "?", "!", ","] or len(sess.transcript)>300:
-                                # 이때까지 자동으로 script 따던게 있을테니 그걸 리턴한다.
-                                print("END - ", sess.transcript)
+                            if sess.end_count > -1:
+                                sess.end_count += 1
+                            
+                            if vad_event == "end":
+                                sess.current_audio_sate = "none"
+                                sess.end_count = 0
+
+                            # 말을 멈췄는데 길게 했거나
+                            # 짧더라도 말을 멈춘지 2초가 넘었으면
+                            if (vad_event == "end" and len(sess.transcript)>100) or (sess.current_audio_sate == "none" and sess.end_count>60):
+                                await sess.out_q.put(jdumps({"type": "transcript", "text": sess.transcript, "is_final": True}))
+                                print("[VAD End] - ", sess.transcript, "=", len(sess.transcript))
                                 sess.current_audio_sate = "none"
                                 sess.audios = np.empty(0, dtype=np.float32)
-                                await sess.out_q.put(jdumps({"type": "transcript", "text": sess.transcript, "is_final": True}))
-                                
                                 await translate_next(sess, sess.transcript, is_final=True)
                                 sess.transcript = ""
+                                sess.end_count = -1
+                                sess.count_after_last_translation=0
                                 continue
-                                
+                            
                     except Exception as e:
                      dprint("Error : ", e)
                 
@@ -249,33 +248,26 @@ async def ws_endpoint(ws: WebSocket):
         await teardown_session(sess)
         sessions.pop(id(ws), None)
 
-async def translate_next(sess: Session, final_text: str, is_final=True):
-    sess.current_transcript = sess.current_transcript + " " + final_text if sess.current_transcript else final_text
-    
-    # 너무 짧은 문장이나 단어는 굳이 바로 번역하지 않기.
-    if len(sess.current_transcript)<6 or final_text.strip() == "":
+async def translate_next(sess: Session, transcript: str, is_final=True):
+    if len(transcript)<6:
         return
-
-    # run_translate_async안에서 바로 결과를 client에게 보낸다.
-    st = time.time()
-    translated_text = await run_translate_async(sess)
     
+    st = time.time()
+    sess.current_transcript = transcript
+    translated_text = await run_translate_async(sess, is_final)
     print(f"[Translate {time.time() - st:.2f}s] - {translated_text}")
-    # sess.current_transcript = ""
-    # return
+    return
 
     translated_text = translated_text.replace("<SKIP>", "")
     translated_text = translated_text.replace("...", "")
     if translated_text == "" or translated_text is None:
         return
 
-    # 3-5) 누적 번역 업데이트
     if sess.current_translated and "<CORRECTED>" not in translated_text:
         sess.current_translated += " " + translated_text
     else:
         sess.current_translated = translated_text
-
-    # 3-6) 문장 종료(<END>) 처리. client 단과 액션을 맞춰야함.
+    
     if "<END>" in translated_text:
         translated_text = translated_text.replace("<END>", "").strip()
 
@@ -286,7 +278,14 @@ async def translate_next(sess: Session, final_text: str, is_final=True):
         sess.current_transcript = ""
         sess.current_translated = ""
 
+# --- 추가: 동기 translate를 스레드에서 돌리고, 콜백은 루프-세이프로 브리지 ---
 async def run_translate_async(sess: Session, is_final=True) -> str:
+    """
+    sess.current_transcript, sess.current_translated, sess.transcripts[-5:]
+    를 사용해서 동기 translate를 스레드에서 실행.
+    onToken 콜백은 루프-세이프로 sess.out_q에 push.
+    최종 완성 문자열을 반환.
+    """
     loop = asyncio.get_running_loop()
 
     sess.translated = ''
@@ -312,6 +311,19 @@ async def run_translate_async(sess: Session, is_final=True) -> str:
         except Exception as e:
             dprint("[debounce_flush] WARN: debounce_flush cancelled", e)
 
+    # def on_token(tok: str):
+    #     return
+    #     # 다른 스레드에서 불릴 수 있으므로 루프 스레드로 래핑
+    #     if sess.first_translated_token_output_time == 0:
+    #         sess.first_translated_token_output_time = time.time()
+
+    #     def _append_and_schedule():
+    #         sess.tts_buf.append(tok)
+    #         if sess.tts_debounce_task and not sess.tts_debounce_task.done():
+    #             sess.tts_debounce_task.cancel()
+    #         sess.tts_debounce_task = asyncio.create_task(debounce_flush(110))
+    #     loop.call_soon_threadsafe(_append_and_schedule)
+
     def on_token(tok: str):
         sess.translated += tok
         if tok[-1] == '.':
@@ -319,28 +331,22 @@ async def run_translate_async(sess: Session, is_final=True) -> str:
     
     def run_blocking():
         # 동기 translate 호출
-        # return LLM.translate(sess.current_transcript, target="ko")
-        return translate_simple(
-            prevScripts=sess.transcripts[-5:],
-            current_scripted_sentence=sess.current_transcript,
-            current_translated=sess.current_translated,
-            prevTranslations=sess.translateds,
-            onToken=on_token,
-        )
+        return LLM.translate(sess.current_transcript, target="ko")
+        # return translate_speaker(
+        #     prevScripts=sess.transcripts[-5:],
+        #     current_scripted_sentence=sess.current_transcript,
+        #     current_translated=sess.current_translated,
+        #     onToken=on_token,
+        # )
 
     # 동기 작업을 thread로
     loop = asyncio.get_running_loop()
     output = await loop.run_in_executor(None, run_blocking)
     
-    final_text = output.get("text", "")
-    if final_text == "":
+    translated_text = output.get("text", "")
+    if translated_text == "":
         dprint("No translated text")
         return ''
-
-    if 'prompt_tokens_cached' in output.keys():
-        sess.llm_cached_token_count += output["prompt_tokens_cached"]
-        sess.llm_input_token_count += output["prompt_tokens"]
-        sess.llm_output_token_count += output["completion_tokens"]
 
     if sess.tts_debounce_task and not sess.tts_debounce_task.done():
         sess.tts_debounce_task.cancel()
@@ -351,12 +357,12 @@ async def run_translate_async(sess: Session, is_final=True) -> str:
         flush_tts_chunk()
 
     loop.call_soon_threadsafe(_final_flush)
-    # await sess.tts_in_q.put(final_text) # This is for TTS generation
+    # await sess.tts_in_q.put(translated_text) # This is for TTS generation
 
     # 최종 결과 알림
-    await sess.out_q.put(jdumps({"type": "translated", "text": final_text, "is_final": True if "<END>" in final_text else False}))
-    # await sess.out_q.put(jdumps({"type": "translated", "text": final_text + "<END>" if is_final else final_text, "is_final": is_final}))
-    return final_text
+    # await sess.out_q.put(jdumps({"type": "translated", "text": translated_text, "is_final": is_final}))
+    await sess.out_q.put(jdumps({"type": "translated", "text": translated_text + "<END>" if is_final else translated_text, "is_final": is_final}))
+    return translated_text
 
 @torch.inference_mode()
 async def zipvoice_streamer(sess: Session, prompt_text: str, prompt_wav_path: str):

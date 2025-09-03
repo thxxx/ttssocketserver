@@ -123,10 +123,8 @@ class NemoASRBackend:
         # NeMo 입력 SR 요구 사항이 모델마다 다를 수 있지만, 대부분 16k OK
         audio = _ensure_sr(audio, sample_rate, WHISPER_SR)
 
-        # NeMo는 파일/경로 입력이 기본이지만 numpy 1D도 허용하는 구현이 있습니다.
-        # 모델 버전에 따라 다르면 torchaudio.save(tmp) 방식으로 우회하세요.
-        result = self.model.transcribe(audio)
-        # 반환 형태가 버전에 따라 다를 수 있어 방어적으로 처리
+        result = self.model.transcribe(audio, source_lang='en', target_lang='en')
+        
         if isinstance(result, (list, tuple)) and len(result) > 0:
             # canary 계열은 특수 토큰이 섞일 수 있음
             text = getattr(result[0], "text", "") or str(result[0])

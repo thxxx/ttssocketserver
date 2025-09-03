@@ -47,3 +47,9 @@ class Session:
         self.is_network_logging = False
         self.current_audio_sate = "none"
         self.new_speech_start = 0
+
+        self.transcript = ""
+        self.translated = ""
+        self.end_count = -1
+        self.count_after_last_translation = 0
+

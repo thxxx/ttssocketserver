@@ -8,21 +8,23 @@ client = OpenAI(api_key=OPENAI_KEY)
 
 
 def translate_simple(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken:Callable[[str], None]):
-    print("호출됩니다.")
+    hist = "\n".join([f" me:{x}," for x in prevScripts])
     
     response = client.chat.completions.create(
         model='gpt-4.1-mini',  # 최신 경량 모델
         messages=[
-            {"role": "system", "content": "You are a professional translator specializing in [Korean] → [English] translation. Your job is to incrementally translate Korean speech as it comes in."},
+            {"role": "system", "content": "You are a professional translator specializing in [English] → [Korean] translation. Your job is to incrementally translate English speech as it comes in."},
             {"role": "user", "content": f"""
-아래의 <current_scripted_sentence>를 영어로 번역해줘. 근데 사람이 말하는걸 바로 기록한거라 잘못 알아들어서 오타가 섞여있을 수 있어. 알아서 감안한 뒤 번역해줘.
-Only retunr translated english, Do not include anything else.
+아래의 <me_speaking>를 한글로 번역해줘. 근데 사람이 말하는걸 바로 기록한거라 잘못 알아들어서 오타가 섞여있을 수 있어. 알아서 감안한 뒤 번역해줘.
+Only return translated korean of <me_speaking>, Do not include anything else.
+<history>는 내가 <me_speaking> 이전에 말하고 있던 문장들을 의미해. 제대로된 번역을 위한 맥락으로 사용해줘.
 
 -- INPUT --
-<current_scripted_sentence> : {current_scripted_sentence}
+<history>{hist}
+<me_speaking> : {current_scripted_sentence}
 """}
         ],
-        temperature=0.5,
+        temperature=0.1,
         user="k2e-translator-v1-hojinkhj6051230808",
         prompt_cache_key="k2e-translator-v1-hojinkhj6051230808",
         stream=True,
@@ -54,6 +56,8 @@ Only retunr translated english, Do not include anything else.
     }
 
 def translate(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken:Callable[[str], None]):
+    hist = "\n".join([f" me:{x}," for x in prevScripts])
+    
     response = client.chat.completions.create(
         model='gpt-4.1-mini',  # 최신 경량 모델
         messages=[
@@ -62,24 +66,24 @@ def translate(prevScripts:str, current_scripted_sentence:str, current_translated
 Your task is to translate the input text into **natural, conversational spoken [English]**.
 
 # INPUT FORMAT:
-- <prevScripts>: Previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural, mitigating scripting errors. **Never translate the prevScripts**.
-- <current_scripted_sentence>: Current Korean sentence from speech recognition (may contain pronunciation errors)
-- <translated_history>: Parts of the current sentence that were already translated to English previously
+- <previous utterances>: Previous 5 sentences What user said. You can use it to understand the context of the current sentence and make the translation more accurate and natural, mitigating scripting errors. **Never translate the prevScripts**.
+- <transcript>: Current Korean sentence from speech recognition (may contain pronunciation errors)
+- <current translation>: Parts of the current sentence that were already translated to English previously
 
 # YOUR TASK:
-Translate only the NEW parts of <current_scripted_sentence> that haven't been covered in <translated_history>. Output the translation incrementally as more Korean text becomes available.
+Translate only the NEW parts of <transcript> that haven't been covered in <current translation>. Output the translation incrementally as more Korean text becomes available.
 
 # RULES:
-1. Only translate the portion NOT already covered in <translated_history>
+1. Only translate the portion NOT already covered in <current translation>
 2. Translate as much as safely possible without waiting for the complete sentence
 3. Use conversational/spoken English style
 4. It's OK to output just 0-2 words at a time
 5. Add natural fillers like "uhm" or "you know" if needed for natural flow
 6. **If translating now might cause errors when more Korean follows, just output <SKIP>**
-7. Do NOT repeat any text from <translated_history> in your output. You output should be english only.
+7. Do NOT repeat any text from <current translation> in your output. You output should be english only.
 8. All information must be preserved - no loss or mistranslation allowed
-9. If the combination of <translated_history> and your current output covers the full meaning of the Korean input, include <END> at the end of your output.
-10. <prevScripts> is the previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural. **Never translate the prevScripts**.
+9. If the combination of <current translation> and your current output covers the full meaning of the Korean input, include <END> at the end of your output.
+10. <previous utterances> is the previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural. **Never translate the prevScripts**.
 11. Write all numbers in words (e.g., one, two) instead of digits.
 Do not use any symbols that cannot be read aloud; if you must include them, write them as pronounceable words.
 12. In current_scripted_sentence, there may be words incorrectly transcribed by the scripting model due to pronunciation errors or noise. Translate the input sentence as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
@@ -90,7 +94,7 @@ ex) '세마리 들리시나요?' -> 'Can you hear my voice?"
 15. Use colloquial vocabulary and sentence structure common in spoken conversation.
 16. If a direct translation sounds awkward, rephrase it while keeping the intent.
 17. Output only the translation, without additional commentary.
-19. If you detect that <translated_history> contains an error or mistranslation compared to the meaning of the current <current_scripted_sentence>, 
+19. If you detect that <current translation> contains an error or mistranslation compared to the meaning of the current <transcript>, 
     you may output a short conversational correction in English before continuing, such as 
     "I mean", "Actually", "Wait, no", "No, I meant", etc to naturally fix the meaning.
     Keep the correction short and immediately follow it with the corrected translation.
@@ -178,29 +182,29 @@ When in doubt, ALWAYS choose '<SKIP>'. Do not try to guess the next sentence.
 NEVER translate based only on the current_scripted_sentence without considering that more words may follow.
 
 EXAMPLE:
-<current_scripted_sentence>: 오늘 오후에 회의가 잡혀 있어서 그 전에 자료를 정리하고
-<translated_history>: I have a meeting
+<transcript>: 오늘 오후에 회의가 잡혀 있어서 그 전에 자료를 정리하고
+<current translation>: I have a meeting
 Output: scheduled this afternoon
 
-<current_scripted_sentence>: 디자인 시안 수정본은 오늘 중으로 전달드릴 예정이고, 개발 쪽에도 공유해둘게요.
-<translated_history>: The revised design draft will be sent over today,
+<transcript>: 디자인 시안 수정본은 오늘 중으로 전달드릴 예정이고, 개발 쪽에도 공유해둘게요.
+<current translation>: The revised design draft will be sent over today,
 Output: and I'll also share it with the dev team.<END>
 
-<current_scripted_sentence>: 나는 그사람이 너무너무
-<translated_history>: I
+<transcript>: 나는 그사람이 너무너무
+<current translation>: I
 Output: <SKIP>
 
-<current_scripted_sentence>: 그냥 큐가 잘 쌓이는지 만이라도
-<translated_history>: 
+<transcript>: 그냥 큐가 잘 쌓이는지 만이라도
+<current translation>: 
 Output: Just
 # Incomplete clause, needs following context
 
 Only output the new translation. No explanations or additional text.
 
 -- INPUT --
-<prevScripts>: {prevScripts}
-<current_scripted_sentence> : {current_scripted_sentence}
-<translated_history> : {current_translated}
+<previous utterances>: {hist}
+<transcript> : {current_scripted_sentence}
+<current translation> : {current_translated}
 """}
         ],
         temperature=0.5,
@@ -235,42 +239,42 @@ Only output the new translation. No explanations or additional text.
     }
 
 
-def translate_speaker(prevScripts:str, current_scripted_sentence:str, current_translated:str):
+def translate_speaker(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken:Callable[[str], None]):
     response = client.chat.completions.create(
         model='gpt-4.1-mini',  # 최신 경량 모델
         messages=[
-            {"role": "system", "content": "You are a professional translator specializing in [English] → [Korean] translation. Your job is to incrementally translate Korean speech as it comes in."},
+            {"role": "system", "content": "You are a professional translator specializing in [English] → [Korean] translation. Your job is to incrementally translate English speech as it comes in."},
             {"role": "user", "content": f"""
 # INPUT FORMAT:
-- <prevScripts>: Previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural, mitigating recognition errors. **Never translate the prevScripts**.
-- <current_scripted_sentence>: Current English sentence from speech recognition (may contain pronunciation errors)
-- <translated_history>: Parts of the current sentence that were already translated to Korean previously
+- <previous utterances>: Previous 5 sentences What user said. You can use it to understand the context of the current sentence and make the translation more accurate and natural, mitigating scripting errors. **Never translate the prevScripts**.
+- <transcript>: Current English sentence from speech recognition (may contain pronunciation errors)
+- <current translation>: Parts of the current sentence that were already translated to Korean previously
 
 # YOUR TASK:
-Translate only the NEW parts of <current_scripted_sentence> that haven't been covered in <translated_history>. Output the translation incrementally as more English text becomes available.
+Translate only the NEW parts of <transcript> that haven't been covered in <current translation>. Output the translation incrementally as more English text becomes available.
 
 # RULES:
-1. Only translate the portion NOT already covered in <translated_history>.
-2. But if you think <translated_history> is wrong, return full new corrected translation and Start output with <CORRECTED>
+1. Only translate the portion NOT already covered in <current translation>.
+2. But if you think <current translation> is wrong, return full new corrected translation and Start output with <CORRECTED>
 3. Translate as much as safely possible without waiting for the complete sentence.
 4. But **If translating now might cause errors when more English follows, just output <SKIP>**.
 5. Use polite and formal Korean (존댓말).
 6. It's OK to output just 0-2 words at a time.
 7. All information must be preserved — no loss or mistranslation allowed.
-8. If the combination of <translated_history> and your current output covers the full meaning of the English input and you think that <current_scripted_sentence> is complete as a sentence, include <END> at the end of your output.
-9. <prevScripts> is the previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural. **Never translate the prevScripts**.
-10. In <current_scripted_sentence>, there may be words incorrectly transcribed due to pronunciation errors or noise. Translate as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
+8. If the combination of <current translation> and your current output covers the full meaning of the English input and you think that <transcript> is complete as a sentence, include <END> at the end of your output.
+9. <previous utterances> is the previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural. **Never translate the them**.
+10. In <transcript>, there may be words incorrectly transcribed due to pronunciation errors or noise. Translate as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
 11. Preserve the original meaning, tone, and nuance.
 12. Avoid overly literal translations — adapt expressions to sound natural in Korean.
 13. If a direct translation sounds awkward, rephrase it while keeping the intent.
 14. Output only the translation, without additional commentary.
-15. If you detect that <translated_history> contains an error or mistranslation compared to the meaning of the current <current_scripted_sentence>, you can output full corrected translation and start with <CORRECTED>
+15. If you detect that <current translation> contains an error or mistranslation compared to the meaning of the current <transcript>, you can output full corrected translation and start with <CORRECTED>
 16. When in doubt, always choose <SKIP> rather than guessing.
 17. NEVER translate based only on the current_scripted_sentence without considering that more words may follow.
-18. If, when looking at <current_scripted_sentence>, it seems likely that more of the sentence will follow (because it is being received in real-time), you must append "..." at the end of your output.
+18. If, when looking at <transcript>, it seems likely that more of the sentence will follow (because it is being received in real-time), you must append "..." at the end of your output.
 
 # CRITICAL SKIP RULES:
-If, when looking at <current_scripted_sentence>, it seems likely that more of the sentence will follow (because it is being received in real-time), you must append "..." at the end of your output.
+If, when looking at <transcript>, it seems likely that more of the sentence will follow (because it is being received in real-time), you must append "..." at the end of your output.
 
 You must output "<SKIP>" if ANY of the following is true:
 - The sentence might still continue with additional words that could make current translation wrong.
@@ -278,33 +282,33 @@ You must output "<SKIP>" if ANY of the following is true:
 - The object or complement is incomplete and might change the meaning.
 - You are not 100% certain that your translation will remain correct after the next few English words.
 
-<prevScripts>를 보고 이전에 어떤 식의 얘기를 하고있었는지를 파악하고 현재 문장이 어떻게 번역되어야 자연스러운지를 반영해서 한글로 번역해줘.
+<previous utterances>를 보고 이전에 어떤 식의 얘기를 하고있었는지를 파악하고 현재 문장이 어떻게 번역되어야 자연스러운지를 반영해서 한글로 번역해줘.
 
 # EXAMPLES:
-<current_scripted_sentence>: I have a meeting scheduled this afternoon, so before that I need to organize the materials
-<translated_history>: 회의가 오늘 오후에 예정되어 있습니다.
+<transcript>: I have a meeting scheduled this afternoon, so before that I need to organize the materials
+<current translation>: 회의가 오늘 오후에 예정되어 있습니다.
 Output: 그래서 그 전에 자료를 정리...
 
-<current_scripted_sentence>: The revised design draft will be sent over today, and I'll also share it with the dev team.
-<translated_history>: 새로운 디자인 시안은 전달될 예정이고,
+<transcript>: The revised design draft will be sent over today, and I'll also share it with the dev team.
+<current translation>: 새로운 디자인 시안은 전달될 예정이고,
 Output: <CORRECTED>수정된 디자인 시안은 오늘 중으로 전달될 예정이고, 개발팀에도 공유하겠습니다.<END>
 
-<current_scripted_sentence>: Just want to make sure the queue is building up properly
-<translated_history>:
+<transcript>: Just want to make sure the queue is building up properly
+<current translation>:
 Output: 큐가 제대로 쌓이고 있는지만이라도...
 
-<current_scripted_sentence>: I'm not telling you you got to be straight A's. I'm not telling you you got to win this or be the best. I need 100% effort, man.
-<translated_history>: A학점을 받아야 한다거나 이겨야 한다고 말하는 것이 아닙니다.
+<transcript>: I'm not telling you you got to be straight A's. I'm not telling you you got to win this or be the best. I need 100% effort, man.
+<current translation>: A학점을 받아야 한다거나 이겨야 한다고 말하는 것이 아닙니다.
 Output: 단지 100%의 노력을 쏟아야 한다는 거죠.<END>
 
-<current_scripted_sentence>: Let's table this discussion until we have the latest numbers from finance team so
-<translated_history>: 이 논의를 테이블에 올려서 바로 진행합시다.
+<transcript>: Let's table this discussion until we have the latest numbers from finance team so
+<current translation>: 이 논의를 테이블에 올려서 바로 진행합시다.
 Output: <CORRECTED>재무팀의 최신 수치를 받기 전까지 이 논의는 보류하겠습니다...
 
 -- INPUT --
-<prevScripts>: {prevScripts}
-<current_scripted_sentence> : {current_scripted_sentence}
-<translated_history> : {current_translated}
+<previous utterances>: {prevScripts}
+<transcript> : {current_scripted_sentence}
+<current translation> : {current_translated}
 """}
         ],
         temperature=0.5,
@@ -328,6 +332,7 @@ Output: <CORRECTED>재무팀의 최신 수치를 받기 전까지 이 논의는 
             ct += u.completion_tokens
         else:
             if chunk.choices[0].delta.content != '' and chunk.choices[0].delta.content is not None:
+                onToken(chunk.choices[0].delta.content)
                 sent += chunk.choices[0].delta.content
 
     return {
@@ -344,59 +349,59 @@ def translate_speaker_make_end(prevScripts:str, current_scripted_sentence:str, c
             {"role": "system", "content": "You are a professional translator specializing in [English] → [Korean] translation. Your job is to incrementally translate Korean speech as it comes in."},
             {"role": "user", "content": f"""
 # INPUT FORMAT:
-- <prevScripts>: Previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural, mitigating recognition errors. **Never translate the prevScripts**.
-- <current_scripted_sentence>: Current English sentence from speech recognition (may contain pronunciation errors)
-- <translated_history>: Parts of the current sentence that were already translated to Korean previously
+- <previous utterances>: Previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural, mitigating recognition errors. **Never translate the prevScripts**.
+- <transcript>: Current English sentence from speech recognition (may contain pronunciation errors)
+- <current translation>: Parts of the current sentence that were already translated to Korean previously
 
 # YOUR TASK:
-Translate only the NEW parts of <current_scripted_sentence> that haven't been covered in <translated_history>. Output the translation incrementally as more English text becomes available.
+Translate only the NEW parts of <transcript> that haven't been covered in <current translation>. Output the translation incrementally as more English text becomes available.
 
 # RULES:
-1. Only translate the portion NOT already covered in <translated_history>.
-2. But if you think <translated_history> is wrong, return full new corrected translation and Start output with <CORRECTED>
+1. Only translate the portion NOT already covered in <current translation>.
+2. But if you think <current translation> is wrong, return full new corrected translation and Start output with <CORRECTED>
 3. Translate as much as safely possible without waiting for the complete sentence.
 5. Use polite and formal Korean (존댓말).
 6. It's OK to output just zero to two words.
 7. All information must be preserved — no loss or mistranslation allowed.
-8. If the combination of <translated_history> and your current output covers the full meaning of the English input and you think that <current_scripted_sentence> is complete as a sentence, include <END> at the end of your output.
-9. <prevScripts> is the previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural. **Never translate the prevScripts**. 이전에 어떤 식의 얘기를 하고있었는지를 파악하고 현재 문장이 어떻게 번역되어야 자연스러운지를 반영해서 한글로 번역해줘.
-10. In <current_scripted_sentence>, there may be words incorrectly transcribed due to pronunciation errors or noise. Translate as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
+8. If the combination of <current translation> and your current output covers the full meaning of the English input and you think that <transcript> is complete as a sentence, include <END> at the end of your output.
+9. <previous utterances> is the previous 5 sentences from the meeting. You can use it to understand the context of the current sentence and make the translation more accurate and natural. **Never translate the prevScripts**. 이전에 어떤 식의 얘기를 하고있었는지를 파악하고 현재 문장이 어떻게 번역되어야 자연스러운지를 반영해서 한글로 번역해줘.
+10. In <transcript>, there may be words incorrectly transcribed due to pronunciation errors or noise. Translate as faithfully as possible, but if a word is nonsensical and it is reasonable to infer a similar-sounding word from the context, interpret it that way in your translation.
 11. Preserve the original meaning, tone, and nuance.
 12. Avoid overly literal translations — adapt expressions to sound natural in Korean.
 13. If a direct translation sounds awkward, rephrase it while keeping the intent.
 14. Output only the translation, without additional commentary.
-15. If you detect that <translated_history> contains an error or mistranslation compared to the meaning of the current <current_scripted_sentence>, you can output full corrected translation and start with <CORRECTED>
+15. If you detect that <current translation> contains an error or mistranslation compared to the meaning of the current <transcript>, you can output full corrected translation and start with <CORRECTED>
 17. NEVER translate based only on the current_scripted_sentence without considering that more words may follow.
-18. If, when looking at <current_scripted_sentence>, it seems likely that the sentence is not end yet(because it is being received in real-time), 할 수 있는 만큼만 번역하고 절대 지나치게 많이 번역하려고 하지마. 그리고 you must append "..." at the end of your output.
+18. If, when looking at <transcript>, it seems likely that the sentence is not end yet(because it is being received in real-time), 할 수 있는 만큼만 번역하고 절대 지나치게 많이 번역하려고 하지마. 그리고 you must append "..." at the end of your output.
 
 ! REMIND:
-If you think <translated_history> is wrong, return full new corrected translation and Start output with <CORRECTED>
+If you think <current translation> is wrong, return full new corrected translation and Start output with <CORRECTED>
 
 # EXAMPLES:
-<current_scripted_sentence>: I have a meeting scheduled this afternoon, so before that I need to organize the materials.
-<translated_history>: 회의가 오늘 오후에 예정되어 있습니다.
+<transcript>: I have a meeting scheduled this afternoon, so before that I need to organize the materials.
+<current translation>: 회의가 오늘 오후에 예정되어 있습니다.
 Output: 그래서 저는 그 전에 자료를 정리해야 합니다.<END>
 
-<current_scripted_sentence>: The revised design draft will be sent over today, and I'll also share it with the dev team.
-<translated_history>: 새로운 디자인 시안은 전달될 예정이고,
+<transcript>: The revised design draft will be sent over today, and I'll also share it with the dev team.
+<current translation>: 새로운 디자인 시안은 전달될 예정이고,
 Output: <CORRECTED>수정된 디자인 시안은 오늘 중으로 전달될 예정이고, 개발팀에도 공유하겠습니다.<END>
 
-<current_scripted_sentence>: Just want to make sure the queue is building up properly.
-<translated_history>:
+<transcript>: Just want to make sure the queue is building up properly.
+<current translation>:
 Output: 큐가 제대로 쌓이고 있는지만이라도 알고싶네요.<END>
 
-<current_scripted_sentence>: I'm not telling you you got to be straight A's. I'm not telling you you got to win this or be the best. I need 100% effort, man.
-<translated_history>: A학점을 받아야 한다거나 이겨야 한다고 말하는 것이 아닙니다.
+<transcript>: I'm not telling you you got to be straight A's. I'm not telling you you got to win this or be the best. I need 100% effort, man.
+<current translation>: A학점을 받아야 한다거나 이겨야 한다고 말하는 것이 아닙니다.
 Output: 단지 100%의 노력을 쏟아야 한다는 거죠.<END>
 
-<current_scripted_sentence>: Let's table this discussion until we have the latest numbers from finance team
-<translated_history>: 이 논의를 테이블에 올려서 바로 진행합시다.
+<transcript>: Let's table this discussion until we have the latest numbers from finance team
+<current translation>: 이 논의를 테이블에 올려서 바로 진행합시다.
 Output: <CORRECTED>재무팀의 최신 수치를 받기 전까지 이 논의는 보류하겠습니다.<END>
 
 -- INPUT --
-<prevScripts>: {prevScripts}
-<current_scripted_sentence> : {current_scripted_sentence}
-<translated_history> : {current_translated}
+<previous utterances>: {prevScripts}
+<transcript> : {current_scripted_sentence}
+<current translation> : {current_translated}
 """}
         ],
         temperature=0.6,

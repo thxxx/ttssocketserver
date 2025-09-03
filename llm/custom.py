@@ -12,7 +12,7 @@ class CustomLLM():
             gpu_memory_utilization=0.5,   # 메모리 여유 확보
             disable_log_stats=True
         )
-        self.sp = SamplingParams(temperature=0.3, max_tokens=512)
+        self.sp = SamplingParams(temperature=0.1, max_tokens=512)
 
     def translate(self, text, target="ko"):
         prompt = f"Translate into {target}:\n{text} <{target}>"

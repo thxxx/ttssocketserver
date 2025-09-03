@@ -29,7 +29,7 @@ DEFAULT_ARGS = {
     "num_step": None,
     "guidance_scale": None,
     "feat_scale": 0.1,
-    "speed": 0.9,
+    "speed": 1.2,
     "t_shift": 0.5,
     "target_rms": 0.1,
 }

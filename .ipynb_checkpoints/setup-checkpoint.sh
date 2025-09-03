@@ -12,7 +12,7 @@ git config user.name thxxx
 
 pip install -U nemo_toolkit['asr']
 
-# uvicorn server:app --host 0.0.0.0 --port 5000
+# uvicorn yourSpeakerServer:app --host 0.0.0.0 --port 5000
 
 pip install --find-links https://k2-fsa.github.io/icefall/piper_phonemize.html
 pip install torchaudio numpy lhotse huggingface_hub safetensors tensorboard vocos
