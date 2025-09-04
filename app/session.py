@@ -52,4 +52,5 @@ class Session:
         self.translated = ""
         self.end_count = -1
         self.count_after_last_translation = 0
+        self.pre_roll = deque(maxlen=5)
 

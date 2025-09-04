@@ -153,20 +153,27 @@ def generate_sentence(prompt_text: str, prompt_wav_path: str, text: str, ctx: di
     params = ctx["params"]
 
     tokens = tokenizer.texts_to_token_ids([text])
-    prompt_tokens = tokenizer.texts_to_token_ids([prompt_text])
+    prompt_tokens = tokenizer.texts_to_token_ids([prompt_text]) if prompt_text else None
 
-    wav_tensor, wav_sr = torchaudio.load(prompt_wav_path)
-    if wav_sr != ctx["sampling_rate"]:
-        resampler = torchaudio.transforms.Resample(orig_freq=wav_sr, new_freq=ctx["sampling_rate"])
-        wav_tensor = resampler(wav_tensor)
+    # prompt wav 처리
+    if prompt_wav_path is not None:
+        wav_tensor, wav_sr = torchaudio.load(prompt_wav_path)
+        if wav_sr != ctx["sampling_rate"]:
+            resampler = torchaudio.transforms.Resample(orig_freq=wav_sr, new_freq=ctx["sampling_rate"])
+            wav_tensor = resampler(wav_tensor)
 
-    prompt_rms = torch.sqrt(torch.mean(torch.square(wav_tensor)))
-    if prompt_rms < params.target_rms:
-        wav_tensor = wav_tensor * params.target_rms / prompt_rms
+        prompt_rms = torch.sqrt(torch.mean(torch.square(wav_tensor)))
+        if prompt_rms < params.target_rms:
+            wav_tensor = wav_tensor * params.target_rms / prompt_rms
 
-    prompt_features = feature_extractor.extract(wav_tensor, sampling_rate=ctx["sampling_rate"]).to(device)
-    prompt_features = prompt_features.unsqueeze(0) * params.feat_scale
-    prompt_features_lens = torch.tensor([prompt_features.size(1)], device=device)
+        prompt_features = feature_extractor.extract(wav_tensor, sampling_rate=ctx["sampling_rate"]).to(device)
+        prompt_features = prompt_features.unsqueeze(0) * params.feat_scale
+        prompt_features_lens = torch.tensor([prompt_features.size(1)], device=device)
+    else:
+        # 프롬프트 오디오가 없을 때 → 빈 텐서로 전달
+        prompt_features = None
+        prompt_features_lens = None
+        prompt_rms = params.target_rms
 
     pred_features, *_ = model.sample(
         tokens=tokens,

@@ -5,6 +5,7 @@ import asyncio
 import json
 from typing import Dict, Optional
 from llm.openai import translate, translate_simple
+from llm.openai_translate_simple import translate_simple
 from llm.custom import load_llm
 from stt.openai import open_openai_ws
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -29,6 +30,7 @@ from utils.process import process_data_to_audio
 from tts.zipvoice_infer import load_infer_context, generate_sentence
 from app.session import Session
 from app.session_control import teardown_session, outbound_sender
+from utils.text_process import text_pr
 
 # 모델 로드 (기본값 사용)
 ctx = load_infer_context()
@@ -152,31 +154,43 @@ async def ws_endpoint(ws: WebSocket):
                             if audio is None:
                                 dprint("[NO AUDIO]")
                                 continue
+
+                            # === 여기서 VAD 검사 ===
+                            vads = time.time()
+                            vad_event = check_audio_state(audio)
+
+                            if sess.current_audio_sate != "start":
+                                sess.pre_roll.append(audio)
+
+                                if vad_event == "start":
+                                    print("[Voice Start]")
+                                    sess.current_audio_sate = "start"
+                                    # pre-roll(최대 5개) + 이번 조각으로 audios 시드 생성
+                                    if len(sess.pre_roll) > 0:
+                                        sess.audios = np.concatenate(list(sess.pre_roll) + [audio]).astype(np.float32, copy=False)
+                                    else:
+                                        sess.audios = audio.astype(np.float32, copy=False)
+                                    sess.pre_roll.clear()
+                                    self.buf_count=0
+                                # 아직 start가 아니면(=무음 지속) 계속 프리롤만 업데이트하고 다음 루프
+                                continue
                             
                             sess.audios = np.concatenate([sess.audios, audio])
                             sess.buf_count += 1
 
                             if sess.buf_count%16==15 and sess.current_audio_sate == "start":
                                 st = time.time()
-                                sess.audios = sess.audios[-16000*25:]
+                                sess.audios = sess.audios[-16000*20:]
                                 pcm_bytes = (np.clip(sess.audios, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
-                                sess.transcript = await transcribe_pcm_generic(
+                                newScript = await transcribe_pcm_generic(
                                     audios=pcm_bytes,
                                     sample_rate=16000,
                                     channels=sess.input_channels
                                 )
+                                sess.transcript = text_pr(sess.transcript, newScript)
                                 print(f"script - {sess.transcript}")
                                 await sess.out_q.put(jdumps({"type": "delta", "text": sess.transcript, "is_final": False}))
                                 sess.buf_count = 0
-
-                            # === 여기서 VAD 검사 ===
-                            vads = time.time()
-                            vad_event = check_audio_state(audio)
-
-                            if vad_event == "start":
-                                print("[Voice Start]")
-                                sess.current_audio_sate = "start"
-                                continue
 
                             # if vad_event == "end":
                             #     print(f"[Voice end] - {sess.transcript}")

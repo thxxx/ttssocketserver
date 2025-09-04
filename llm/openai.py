@@ -6,7 +6,6 @@ OPENAI_KEY = os.environ.get("OPENAI_KEY")
 
 client = OpenAI(api_key=OPENAI_KEY)
 
-
 def translate_simple(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken:Callable[[str], None]):
     hist = "\n".join([f" me:{x}," for x in prevScripts])
     
@@ -59,7 +58,7 @@ def translate(prevScripts:str, current_scripted_sentence:str, current_translated
     hist = "\n".join([f" me:{x}," for x in prevScripts])
     
     response = client.chat.completions.create(
-        model='gpt-4.1-nano',  # 최신 경량 모델
+        model='gpt-4.1-mini',  # 최신 경량 모델
         messages=[
             {"role": "system", "content": "You are a professional translator specializing in [Korean] → [English] translation. Your job is to incrementally translate Korean speech as it comes in."},
             {"role": "user", "content": f"""

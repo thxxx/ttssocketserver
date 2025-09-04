@@ -6,27 +6,27 @@ OPENAI_KEY = os.environ.get("OPENAI_KEY")
 
 client = OpenAI(api_key=OPENAI_KEY)
 
-
-def translate_simple(prevScripts:str, current_scripted_sentence:str, current_translated:str, prevTranslations, onToken):
+def translate_simple(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken):
     hist = "\n".join([f" me:{x}," for x in prevScripts])
     
     response = client.chat.completions.create(
-        model='gpt-4.1-mini',  # 최신 경량 모델
+        model='gpt-4.1-nano',  # 최신 경량 모델
         messages=[
-            {"role": "system", "content": "You are a professional translator specializing in [English] → [Korean] translation."},
+            {"role": "system", "content": "You are a professional translator specializing in [Korean] → [English] translation."},
             {"role": "user", "content": f"""
-지금 계속 영어로 말하는걸 한글로 번역하고 있어.
+지금 계속 한글로 말하는걸 영어로 번역하고 있어.
 <previous utterances>는 현재 문장 이전에 이야기하던 문장이야. 번역을 위한 맥락 파악에 사용할 수 있어.
 <speaking english>은 번역해야하는 현재 발화야.
-<korean>은 <speaking english>을 번역 중인 상태의 문장이야.
 
-최대한 빨리 번역을 하고 싶기 때문에 말을 하는 도중의 문장이 <speaking english>에 들어왔을 수도 있어.
+말을 하는걸 script로 만든 input이기 때문에, 발음 문제로 인해서 텍스트가 잘못 들어왔을 수 있어. 그걸 감안해서 번역해줘.
 
+출력 english를 일반 글 문장보다는 실제로 사람이 말하는 것 같은 구어체로 적어줘. 예를 들어, Oh, Ah, uhm..을 쓰거나 아님 같은 단어를 두번 쓰거나 이런 것들 있잖아?
+Translate into casual spoken English. 근데 너무 심하게 하진 말고, 없는 말을 만들거나 들어온 input을 왜곡하면 안돼.
 
 -- INPUT --
 <previous utterances>{hist}
-<speaking english> : {current_scripted_sentence}
-<korean> : {current_scripted_sentence}
+<speaking korean> : {current_scripted_sentence}
+<english> : 
 """}
         ],
         temperature=0.1,

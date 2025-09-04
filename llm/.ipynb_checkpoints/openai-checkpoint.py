@@ -6,7 +6,6 @@ OPENAI_KEY = os.environ.get("OPENAI_KEY")
 
 client = OpenAI(api_key=OPENAI_KEY)
 
-
 def translate_simple(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken:Callable[[str], None]):
     hist = "\n".join([f" me:{x}," for x in prevScripts])
     
@@ -207,7 +206,7 @@ Only output the new translation. No explanations or additional text.
 <current translation> : {current_translated}
 """}
         ],
-        temperature=0.5,
+        temperature=0.1,
         user="k2e-translator-v1-hojinkhj6051230808",
         prompt_cache_key="k2e-translator-v1-hojinkhj6051230808",
         stream=True,
