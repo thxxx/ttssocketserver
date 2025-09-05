@@ -32,6 +32,10 @@ from app.session import Session
 from app.session_control import teardown_session, outbound_sender
 from utils.text_process import text_pr
 
+from chatterbox_infer.tts import ChatterboxTTS
+
+tts_model = ChatterboxTTS.from_pretrained(device="cuda")
+
 # 모델 로드 (기본값 사용)
 ctx = load_infer_context()
 ZIP_PROMPT_WAV_PATH = os.environ.get(
@@ -428,6 +432,159 @@ async def run_translate_async(sess: Session) -> str:
     # 최종 알림은 중복 없이 한 번
     await sess.out_q.put(jdumps({"type": "translated", "text": translated_text, "is_final": True}))
     return translated_text
+
+@torch.inference_mode()
+async def chatter_streamer(sess: Session, prompt_text: str, prompt_wav_path: str):
+    dprint("[chatter_streamer] START")
+    try:
+        loop = asyncio.get_running_loop()
+        sr = 24000
+        FRAME_SEC = 0.5
+        FRAME_SAMPLES = int(sr * FRAME_SEC)
+        OVERLAP = int(0.05 * sr)              # 50ms 교차페이드
+
+        async def consume_loop():
+            while sess.running:
+                text_chunk = await sess.tts_in_q.get()
+                if not text_chunk or not text_chunk.strip():
+                    continue
+
+                t0 = time.time()
+                dprint(f"[zipvoice_streamer] ▶ start streaming for chunk: {text_chunk!r}")
+
+                # --- 스트리밍 상태 변수 (청크별로 리셋) ---
+                last_length = 0               # 모델이 만든 '전체' wav 길이 (누적)
+                last_tail: Optional[torch.Tensor] = None  # 직전 출력 청크의 꼬리 (OVERLAP 샘플)
+                frame_buf: Optional[torch.Tensor] = None  # 0.5초 프레임 배출용 누적 버퍼 (mono)
+
+                async def emit_frames_from(out_chunk: torch.Tensor, is_final: bool = False):
+                    nonlocal frame_buf
+
+                    if out_chunk.ndim == 2 and out_chunk.shape[0] == 1:
+                        out_chunk = out_chunk[0]
+                    elif out_chunk.ndim == 2 and out_chunk.shape[0] > 1:
+                        # 다채널이면 첫 채널만 사용(필요시 여기서 downmix로 변경 가능)
+                        out_chunk = out_chunk[0]
+                    elif out_chunk.ndim == 1:
+                        pass
+                    else:
+                        out_chunk = out_chunk.reshape(-1)
+
+                    out_chunk = out_chunk.detach()
+
+                    if frame_buf is None:
+                        frame_buf = out_chunk
+                    else:
+                        frame_buf = torch.cat([frame_buf, out_chunk], dim=-1)
+
+                    # 정해진 프레임 길이만큼 계속 배출
+                    while frame_buf.numel() >= FRAME_SAMPLES:
+                        part = frame_buf[:FRAME_SAMPLES]
+                        frame_buf = frame_buf[FRAME_SAMPLES:]
+
+                        # float32/float(-1..1) → int16
+                        pcm = (torch.clamp(part, -1.0, 1.0) * 32767.0).to(torch.int16).cpu().numpy().tobytes()
+                        b64 = base64.b64encode(pcm).decode()
+
+                        await sess.out_q.put(jdumps({
+                            "type": "tts_audio",
+                            "format": "pcm16le",
+                            "sample_rate": sr,
+                            "channels": 1,
+                            "audio": b64,
+                            "isFinal": False,
+                        }))
+
+                    # 마지막이면 프레임에 못 미치는 잔여분까지 모두 내보내고 마지막 패킷에 isFinal=True
+                    if is_final:
+                        if frame_buf is not None and frame_buf.numel() > 0:
+                            part = frame_buf
+                            frame_buf = None
+                            pcm = (torch.clamp(part, -1.0, 1.0) * 32767.0).to(torch.int16).cpu().numpy().tobytes()
+                            b64 = base64.b64encode(pcm).decode()
+                            await sess.out_q.put(jdumps({
+                                "type": "tts_audio",
+                                "format": "pcm16le",
+                                "sample_rate": sr,
+                                "channels": 1,
+                                "audio": b64,
+                                "isFinal": True,
+                            }))
+                        else:
+                            pass
+
+                # --- 모델 스트리밍 루프 ---
+                try:
+                    async for evt in tts_model.generate_stream(
+                        text_chunk,
+                        audio_prompt_path=prompt_wav_path,
+                        # 필요시 추가 파라미터들: temperature, top_p, cfg_weight, exaggeration 등
+                    ):
+                        if evt.get("type") == "chunk":
+                            wav: torch.Tensor = evt["audio"]  # shape: (ch, T_total_so_far)
+
+                            # 누적 길이에서 '새로 추가된' 만큼만 절단
+                            new_total = wav.shape[-1]
+                            delta = new_total - last_length
+                            if delta <= 0:
+                                continue
+
+                            new_part = wav[:, last_length:new_total]  # (ch, delta)
+
+                            # 교차페이드(OVERLAP)
+                            if last_tail is None:
+                                out_chunk = new_part
+                            else:
+                                L = min(OVERLAP, new_part.shape[-1], last_tail.shape[-1])
+                                if L > 0:
+                                    device = wav.device
+                                    dtype = wav.dtype
+                                    fade_in  = torch.linspace(0, 1, L, device=device, dtype=dtype)
+                                    fade_out = 1.0 - fade_in
+                                    mixed = last_tail[:, -L:] * fade_out + new_part[:, :L] * fade_in
+                                    tail = new_part[:, L:]
+                                    out_chunk = torch.cat([mixed, tail], dim=-1)
+                                else:
+                                    out_chunk = new_part
+
+                            # 다음 교차페이드를 위해 최신 꼬리 보관
+                            new_tail_start = max(0, new_total - OVERLAP)
+                            last_tail = wav[:, new_tail_start:new_total].detach()
+
+                            # 0.5초 프레임 단위로 전송
+                            await emit_frames_from(out_chunk, is_final=False)
+
+                            last_length = new_total
+
+                        elif evt.get("type") == "eos":
+                            # 스트림 종료: 잔여 프레임 flush + 마지막 패킷 isFinal=True
+                            await emit_frames_from(torch.empty(0, device=last_tail.device if last_tail is not None else "cpu"), is_final=True)
+                            dprint("✅ [zipvoice_streamer] streaming EOS for chunk")
+                            break
+
+                except Exception as e:
+                    dprint("[chatter_streamer] TTS stream error:", e)
+                    # 에러 발생 시, 남은 버퍼가 있다면 마무리 패킷 전송 시도
+                    try:
+                        await emit_frames_from(torch.empty(0), is_final=True)
+                    except Exception:
+                        pass
+                    continue
+
+                lprint(f"[zipvoice_streamer] streamed {last_length/sr:.2f}s "
+                       f"→ {time.time()-t0:.2f}s")
+
+        await consume_loop()
+
+    except asyncio.CancelledError:
+        dprint("[chatter_streamer] CANCELLED")
+        raise
+    except Exception as e:
+        dprint("[chatter_streamer] ERROR:", e)
+        await sess.out_q.put(jdumps({"type": "tts_error", "message": str(e)}))
+    finally:
+        dprint("[chatter_streamer] END")
+
 
 @torch.inference_mode()
 async def zipvoice_streamer(sess: Session, prompt_text: str, prompt_wav_path: str):

@@ -1,11 +1,21 @@
 # app/ws/session.py
 import asyncio, time, numpy as np
 from typing import Optional, List
+from collections import deque
+from asyncio import Queue
+import queue
 
 class Session:
+    translate_q: Queue[str]
+    translator_task: Optional[asyncio.Task]
+    running: bool = True
+    
     def __init__(self, input_sr: int, input_channels: int):
-        self.oai_ws = None
-        self.oai_task: Optional[asyncio.Task] = None
+        self.translate_q = asyncio.Queue(maxsize=2)   # 역압: 최신 2개까지만 허용
+        self.translator_task = None
+        
+        # self.oai_ws = None
+        # self.oai_task: Optional[asyncio.Task] = None
         self.running = True
 
         self.audio_buf = bytearray()
@@ -45,12 +55,16 @@ class Session:
         self.stt_output_token_count = 0
 
         self.is_network_logging = False
-        self.current_audio_sate = "none"
+        self.current_audio_state = "none"
         self.new_speech_start = 0
 
         self.transcript = ""
         self.translated = ""
         self.end_count = -1
         self.count_after_last_translation = 0
-        self.pre_roll = deque(maxlen=5)
+        self.pre_roll = deque(maxlen=3)
+
+        self.is_use_filler = False
+
+        self.ref_audios = queue.Queue()
 

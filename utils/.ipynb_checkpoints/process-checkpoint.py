@@ -18,6 +18,7 @@ def process_data_to_audio(aud, input_sample_rate: int, whisper_sr: int) -> np.nd
     
     if pcm_bytes:
         x = np.frombuffer(pcm_bytes, dtype=np.int16)
+        # audio = x.astype(np.float32)
         audio = x.astype(np.float32) / 32768.0
         
         if input_sample_rate != whisper_sr:
