@@ -49,7 +49,8 @@ for p in filler_audios_path:
     audiod, sr = librosa.load(p, sr=24000, mono=True)
     audiod = torch.tensor(audiod)
     filler_audios.append(pcm16_b64(audiod))
-prompt_wav_path = "/workspace/ttssocketserver/output.wav"
+
+prompt_wav_path = "./output.wav"
 
 DEBUG = True
 def dprint(*a, **k): 
@@ -132,6 +133,17 @@ async def ws_endpoint(ws: WebSocket):
                         lprint("network latency logging started")
                     continue
 
+                if t == 'scriptsession.setvoice':
+                    aud = data.get("audio")
+                    lprint("Got ref voice!")
+                    if aud:
+                        audio = process_data_to_audio(aud, input_sample_rate=24000, whisper_sr=WHISPER_SR)
+                        if audio is None:
+                            dprint("[NO AUDIO]")
+                            continue
+                        sess.ref_audios.put(audio)
+                        continue
+
                 # 1) 세션 시작: OpenAI Realtime WS 연결
                 if t == "scriptsession.start":
                     if sess.tts_task is None:
@@ -158,7 +170,6 @@ async def ws_endpoint(ws: WebSocket):
                                 continue
 
                             # === 여기서 VAD 검사 ===
-                            vads = time.time()
                             vad_event = check_audio_state(audio)
 
                             if sess.current_audio_state != "start":
@@ -184,7 +195,7 @@ async def ws_endpoint(ws: WebSocket):
                                 print("[Voice End] - ", sess.transcript)
                                 await sess.out_q.put(jdumps({"type": "transcript", "text": sess.transcript, "is_final": True}))
                                 sess.current_audio_state = "none"
-                                sess.ref_audios.put(sess.audios)
+                                # sess.ref_audios.put(sess.audios)
                                 sess.audios = np.empty(0, dtype=np.float32)
                                 sess.end_scripting_time = time.time()
                                 
@@ -195,17 +206,27 @@ async def ws_endpoint(ws: WebSocket):
                                 sess.transcript = ""
                                 continue
                             
-                            if sess.buf_count%16==15 and sess.current_audio_state == "start":
+                            if sess.buf_count%11==10 and sess.current_audio_state == "start":
                                 st = time.time()
                                 sess.audios = sess.audios[-16000*20:]
+                                def likely_voice(audio: np.ndarray, rms_dbfs_thresh: float = -45.0, min_peak: float = 0.01):
+                                    rms = float(np.sqrt(np.mean(audio**2)) + 1e-12)
+                                    dbfs = 20.0 * np.log10(rms)
+                                    peak = float(np.max(np.abs(audio)))
+                                    return (dbfs > rms_dbfs_thresh) and (peak > min_peak)
+                                
                                 pcm_bytes = (np.clip(sess.audios, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
                                 newScript = await transcribe_pcm_generic(
                                     audios=pcm_bytes,
                                     sample_rate=16000,
                                     channels=sess.input_channels
                                 )
+                                if (len(newScript.split(" "))>6 and len(set(newScript.split(" ")))<2) or newScript in ["감사합니다.", "시청해주셔서 감사합니다."]:
+                                    sess.audios = np.empty(0, dtype=np.float32)
+                                    sess.buf_count = 0
+                                    continue
                                 sess.transcript = text_pr(sess.transcript, newScript)
-                                print(f"[{time.time() - st}]script - {sess.transcript}")
+                                print(f"[{time.time() - st:.4f}s {likely_voice(sess.audios)}] script - {sess.transcript}")
                                 await sess.out_q.put(jdumps({"type": "delta", "text": sess.transcript, "is_final": False}))
                                 sess.buf_count = 0
                                 
@@ -383,6 +404,7 @@ async def chatter_streamer(sess: Session):
                 try:
                     if not sess.ref_audios.empty():
                         ref_audio = sess.ref_audios.get()
+                        sess.ref_audios.put(ref_audio)
                         ref_audio = normalize(ref_audio[-int(16000*9):])*0.9
                     else:
                         ref_audio = prompt_wav_path

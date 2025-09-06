@@ -69,7 +69,7 @@ class HFWhisperBackend:
         self.device = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype or (torch.float16 if torch.cuda.is_available() else torch.float32)
 
-        processor = AutoProcessor.from_pretrained(model_id)
+        processor = AutoProcessor.from_pretrained("openai/whisper-large-v3-turbo")
         model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id)
 
         self.pipe = pipeline(
@@ -157,7 +157,8 @@ def load_asr_backend(
     if kind == "korean":
         model_id = kwargs.get("model_id") or os.getenv(
             "HF_ASR_MODEL",
-            "o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2",
+            "/home/khj6051/whisper/whisper-turbo-ko-sixth/checkpoint-6000"
+            # "o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2",
         )
         device = kwargs.get("device")
         dtype = kwargs.get("dtype")

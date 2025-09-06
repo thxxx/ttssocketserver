@@ -6,7 +6,7 @@ SAMPLES_PER_FRAME = SAMPLE_RATE_FOR_VAD * INPUT_FRAME_MS // 1000
 
 silero, utils = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
 (get_speech_timestamps, _, read_audio, VADIterator, collect_chunks) = utils
-vad_iter = VADIterator(silero, threshold=0.35, sampling_rate=SAMPLE_RATE_FOR_VAD, min_silence_duration_ms=150)
+vad_iter = VADIterator(silero, threshold=0.45, sampling_rate=SAMPLE_RATE_FOR_VAD, min_silence_duration_ms=300)
 
 def check_audio_state(x):
     t = torch.from_numpy(x)[:512] # 16kHz 기준, 길이가 512의 배수여야 한다.
