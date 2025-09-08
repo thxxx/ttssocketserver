@@ -78,6 +78,7 @@ class AlignmentStreamAnalyzer:
             if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
                 step_attention = output[1].cpu()  # (B, n_heads, T0, Ti)
                 self.last_aligned_attns[buffer_idx] = step_attention[0, head_idx]  # (T0, Ti)
+        
 
         target_layer = tfmr.layers[layer_idx].self_attn
         # Register hook and store the handle
@@ -154,6 +155,7 @@ class AlignmentStreamAnalyzer:
                 self.generated_tokens = self.generated_tokens[-8:]
             
         # Check for excessive token repetition (3x same token in a row)
+        print("generated_tokens - ", self.generated_tokens)
         token_repetition = (
             # self.complete and 
             len(self.generated_tokens) >= 3 and
@@ -170,7 +172,9 @@ class AlignmentStreamAnalyzer:
 
         # If a bad ending is detected, force emit EOS by modifying logits
         # NOTE: this means logits may be inconsistent with latents!
-        if long_tail or alignment_repetition or token_repetition:
+        
+        # if long_tail or alignment_repetition or token_repetition:
+        if long_tail or alignment_repetition:
             logger.warning(f"forcing EOS token, {long_tail=}, {alignment_repetition=}, {token_repetition=}")
             # (±2**15 is safe for all dtypes >= 16bit)
             logits = -(2**15) * torch.ones_like(logits)

@@ -4,6 +4,9 @@ from typing import Optional, List
 from collections import deque
 from asyncio import Queue
 import queue
+import orjson as json
+
+def jdumps(o): return json.dumps(o).decode()
 
 class Session:
     translate_q: Queue[str]
@@ -11,7 +14,7 @@ class Session:
     running: bool = True
     
     def __init__(self, input_sr: int, input_channels: int):
-        self.translate_q = asyncio.Queue(maxsize=2)   # 역압: 최신 2개까지만 허용
+        self.translate_q = asyncio.Queue(maxsize=5)   # 역압: 최신 2개까지만 허용
         self.translator_task = None
         
         # self.oai_ws = None
@@ -20,6 +23,7 @@ class Session:
 
         self.audio_buf = bytearray()
         self.audios = np.empty(0, dtype=np.float32)
+        self.end_task = None
 
         self.input_sample_rate = input_sr
         self.input_channels = input_channels
@@ -32,6 +36,8 @@ class Session:
         self.out_q: asyncio.Queue[str] = asyncio.Queue()
         self.sender_task: Optional[asyncio.Task] = None
 
+        self.in_language = "ko"
+        self.out_language = "en"
         self.tts_ws = None
         self.tts_task: Optional[asyncio.Task] = None
         self.tts_in_q: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
@@ -68,3 +74,18 @@ class Session:
 
         self.ref_audios = queue.Queue()
 
+def cancel_end_timer(sess):
+    if sess.end_task and not sess.end_task.done():
+        sess.end_task.cancel()
+    sess.end_task = None
+
+def arm_end_timer(sess, delay=3):
+    cancel_end_timer(sess)
+    async def _timer():
+        try:
+            await asyncio.sleep(delay)
+            await sess.out_q.put(jdumps({"type": "translated", "script": None, "text": "<END>", "is_final": True}))
+            sess.translate_q.put_nowait("<END>")
+        except asyncio.CancelledError:
+            pass
+    sess.end_task = asyncio.create_task(_timer())

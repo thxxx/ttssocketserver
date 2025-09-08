@@ -15,7 +15,8 @@ import time
 from websockets.asyncio.client import connect as ws_connect
 
 print("=== server.py loaded ===")
-def jdumps(o): return json.dumps(o).decode()  # bytes -> str
+
+def jdumps(o): return json.dumps(o).decode()
 
 VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "wj5ree7FcgKDPFphpPWQ")
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")

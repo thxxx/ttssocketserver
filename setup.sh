@@ -10,6 +10,7 @@ pip install pydub
 git config user.email zxcv05999@naver.com
 git config user.name thxxx
 
+# sudo apt-get install -y python3.10-dev build-essential
 pip install -U nemo_toolkit['asr']
 
 pip install --find-links https://k2-fsa.github.io/icefall/piper_phonemize.html

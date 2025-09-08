@@ -138,7 +138,7 @@ class NemoASRBackend:
 # ---------------------------
 # Factory
 # ---------------------------
-BackendKind = Literal["korean", "nemo"]
+BackendKind = Literal["ko", "nemo"]
 
 def load_asr_backend(
     kind: Optional[BackendKind] = None,
@@ -146,19 +146,19 @@ def load_asr_backend(
 ) -> ASRBackend:
     """
     kind:
-      - "korean"   : Hugging Face transformers Whisper-like
+      - "ko"   : Hugging Face transformers Whisper-like
       - "nemo" : NVIDIA NeMo Canary 등
     kwargs:
-      - korean: model_id, device, dtype
+      - ko: model_id, device, dtype
       - nemo: pretrained_name, device
     """
-    kind = (kind or os.getenv("ASR_BACKEND", "korean")).lower()
+    kind = (kind or os.getenv("ASR_BACKEND", "ko")).lower()
 
-    if kind == "korean":
+    if kind == "ko":
         model_id = kwargs.get("model_id") or os.getenv(
             "HF_ASR_MODEL",
-            "/home/khj6051/whisper/whisper-turbo-ko-sixth/checkpoint-6000"
-            # "o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2",
+            # "/home/khj6051/whisper/whisper-turbo-ko-sixth/checkpoint-6000"
+            "o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2",
         )
         device = kwargs.get("device")
         dtype = kwargs.get("dtype")

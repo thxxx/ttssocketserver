@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch import nn, Tensor
 from transformers import LlamaModel, LlamaConfig
 from transformers.generation.logits_process import TopPLogitsWarper, RepetitionPenaltyLogitsProcessor, MinPLogitsWarper
+import time
 
 from .modules.learned_pos_emb import LearnedPositionEmbeddings
 
@@ -20,7 +21,6 @@ from .llama_configs import LLAMA_CONFIGS
 from .inference.t3_hf_backend import T3HuggingfaceBackend
 from .inference.alignment_stream_analyzer import AlignmentStreamAnalyzer
 from ..utils import AttrDict
-
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +318,7 @@ class T3(nn.Module):
         top_p_warper = TopPLogitsWarper(top_p=top_p)
         repetition_penalty_processor = RepetitionPenaltyLogitsProcessor(penalty=float(repetition_penalty))
 
+
         # ---- Initial Forward Pass (no kv_cache yet) ----
         output = self.patched_model(
             inputs_embeds=inputs_embeds,
@@ -418,6 +419,8 @@ class T3(nn.Module):
         _ensure_BOT_EOT(text_tokens, self.hp)
         text_tokens = torch.atleast_2d(text_tokens).to(dtype=torch.long, device=self.device)
 
+        start_time = time.time()
+
         # Default initial speech to a single start-of-speech token
         if initial_speech_tokens is None:
             initial_speech_tokens = self.hp.start_speech_token * torch.ones_like(text_tokens[:, :1])
@@ -488,7 +491,9 @@ class T3(nn.Module):
         )
         # Initialize kv_cache with the full context.
         past = output.past_key_values
+        # print("여기까지 걸리는 시간은? ", time.time() - start_time) # 약 25ms, 거의 없음.
 
+        start_time = time.time()
         # ---- Generation Loop using kv_cache ----
         for i in range(max_new_tokens):
             logits_step = output.logits[:, -1, :]                
@@ -550,5 +555,6 @@ class T3(nn.Module):
             )
             # Update the kv_cache.
             past = output.past_key_values
+            start_time = time.time()
 
         yield {"type": "eos"}

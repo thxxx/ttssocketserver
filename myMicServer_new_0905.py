@@ -1,41 +1,42 @@
 # --- MUST be at the very top (before any vllm/torch import) ---
-import app.boot
 import os, socket, multiprocessing as mp
 import asyncio
-import json
 from typing import Dict, Optional
-from llm.openai_test import translate_simple
+from llm.openai_test import translate_simple, translate
 from llm.custom import load_llm
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from websockets.exceptions import ConnectionClosed
 import orjson as json
 import os
-import websockets
-import base64
 import re
 import time
 from websockets.asyncio.client import connect as ws_connect
 import numpy as np
 import librosa
 import torch
-import contextlib
 import os, multiprocessing as mp
-import math
 import random
 from librosa.util import normalize
 
 from stt.asr import load_asr_backend
 from stt.vad import check_audio_state
 from utils.process import process_data_to_audio
-from app.session import Session
+from app.session import Session, arm_end_timer, cancel_end_timer
 from app.session_control import teardown_session, outbound_sender
 from utils.text_process import text_pr
 
-from chatterbox_infer.tts import ChatterboxTTS
+from chatterbox_infer.mtl_tts import ChatterboxMultilingualTTS
 
 # 파일 상단
 from concurrent.futures import ThreadPoolExecutor
 ENC_EXEC = ThreadPoolExecutor(max_workers=2)
+
+def likely_voice(audio: np.ndarray, rms_dbfs_thresh: float = -45.0, min_peak: float = 0.01):
+    rms = float(np.sqrt(np.mean(audio**2)) + 1e-12)
+    dbfs = 20.0 * np.log10(rms)
+    peak = float(np.max(np.abs(audio)))
+    return (dbfs, peak)
+    # return (dbfs > rms_dbfs_thresh) and (peak > min_peak)
 
 def pcm16_b64(part: torch.Tensor) -> str:
     arr = (torch.clamp(part, -1.0, 1.0).to(torch.float32) * 32767.0) \
@@ -67,8 +68,10 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
 app = FastAPI()
 
-ASR = load_asr_backend(kind="korean")
-tts_model = ChatterboxTTS.from_pretrained(device="cuda")
+global ASR, tts_model
+
+ASR = None
+tts_model = None
 LLM = None
 
 INPUT_SAMPLE_RATE = 24000
@@ -87,8 +90,6 @@ def init_models():
         pass
 
     global LLM
-    # if LLM is None:
-    #     LLM = load_llm()
 
 sessions: Dict[int, Session] = {}  # id(ws)로 매핑
 
@@ -146,6 +147,18 @@ async def ws_endpoint(ws: WebSocket):
 
                 # 1) 세션 시작: OpenAI Realtime WS 연결
                 if t == "scriptsession.start":
+                    global ASR, tts_model
+                    lprint("Start ", data);
+
+                    if sess.in_language != data.get("in_language", "ko") or ASR is None:
+                        sess.in_language = data.get("in_language", "ko")
+                        ASR = load_asr_backend(kind=sess.in_language)
+
+                    # if sess.out_language != data.get("out_language", "en") or tts_model is None:
+                    sess.out_language = data.get("out_language", "en")
+                    if tts_model is None:
+                        tts_model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
+                    
                     if sess.tts_task is None:
                         try:
                             sess.tts_task = asyncio.create_task(chatter_streamer(sess))
@@ -176,12 +189,15 @@ async def ws_endpoint(ws: WebSocket):
                                 sess.pre_roll.append(audio)
 
                                 if vad_event == "start":
-                                    print("[Voice Start] ", len(sess.pre_roll))
+                                    cancel_end_timer(sess)
+                                    if not likely_voice(np.concatenate(list(sess.pre_roll) + [audio]).astype(np.float32, copy=False))[1] > 0.1:
+                                        continue
                                     sess.current_audio_state = "start"
                                     if len(sess.pre_roll) > 0:
                                         sess.audios = np.concatenate(list(sess.pre_roll) + [audio]).astype(np.float32, copy=False)
                                     else:
                                         sess.audios = audio.astype(np.float32, copy=False)
+                                    print("[Voice Start] ", likely_voice(sess.audios))
                                     sess.pre_roll.clear()
                                     sess.buf_count = 0
                                 # 아직 start가 아니면(=무음 지속) 계속 프리롤만 업데이트하고 다음 루프
@@ -201,19 +217,15 @@ async def ws_endpoint(ws: WebSocket):
                                 
                                 try:
                                     sess.translate_q.put_nowait(sess.transcript)
-                                except: # queue가 꽉 찼다는 뜻.
+                                except:
                                     print("\n\n\nMax translation queue!\n\n")
+                                # arm_end_timer(sess, delay=3)
                                 sess.transcript = ""
                                 continue
                             
                             if sess.buf_count%11==10 and sess.current_audio_state == "start":
                                 st = time.time()
                                 sess.audios = sess.audios[-16000*20:]
-                                def likely_voice(audio: np.ndarray, rms_dbfs_thresh: float = -45.0, min_peak: float = 0.01):
-                                    rms = float(np.sqrt(np.mean(audio**2)) + 1e-12)
-                                    dbfs = 20.0 * np.log10(rms)
-                                    peak = float(np.max(np.abs(audio)))
-                                    return (dbfs > rms_dbfs_thresh) and (peak > min_peak)
                                 
                                 pcm_bytes = (np.clip(sess.audios, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
                                 newScript = await transcribe_pcm_generic(
@@ -226,7 +238,7 @@ async def ws_endpoint(ws: WebSocket):
                                     sess.buf_count = 0
                                     continue
                                 sess.transcript = text_pr(sess.transcript, newScript)
-                                print(f"[{time.time() - st:.4f}s {likely_voice(sess.audios)}] script - {sess.transcript}")
+                                print(f"[{time.time() - st:.4f}s] script - {sess.transcript}")
                                 await sess.out_q.put(jdumps({"type": "delta", "text": sess.transcript, "is_final": False}))
                                 sess.buf_count = 0
                                 
@@ -235,8 +247,21 @@ async def ws_endpoint(ws: WebSocket):
                 
                 # 3) 커밋 신호 전달 (chunk 경계) = 현재 세팅에서는 VAD를 여기서 검사하기 때문에, 들어올일이 없다.
                 elif t == "input_audio_buffer.commit":
-                    lprint("input_audio_buffer.commit")
-                    continue
+                    lprint("input_audio_buffer.commit - ", sess.transcript)
+                    if sess.transcript is not None and sess.transcript != "":
+                        await sess.out_q.put(jdumps({"type": "transcript", "text": sess.transcript, "is_final": True}))
+                    
+                    if sess.transcript is not None and sess.transcript != "":
+                        try:
+                            sess.translate_q.put_nowait(sess.transcript)
+                        except:
+                            print("\n\n\nMax translation queue!\n\n")
+                        sess.transcript = ""
+                        arm_end_timer(sess, delay=3)
+                    
+                    sess.current_audio_state = "none"
+                    # sess.ref_audios.put(sess.audios)
+                    sess.audios = np.empty(0, dtype=np.float32)
 
                 elif t == "test":
                     ct = data.get("current_time")
@@ -271,24 +296,36 @@ async def ws_endpoint(ws: WebSocket):
         await teardown_session(sess)
         sessions.pop(id(ws), None)
 
+def reset_translation(sess: Session):
+    lprint("reset_translation - ", sess.current_transcript, sess.current_translated)
+    sess.transcripts.append(sess.current_transcript)
+    sess.translateds.append(sess.current_translated)
+    sess.current_transcript = ""
+    sess.current_translated = ""
+
 async def translator_worker(sess: Session):
     while sess.running:
         text = await sess.translate_q.get()
         await translate_one(sess, text)
 
 async def translate_one(sess: Session, transcript: str):
+    if transcript == "<END>":
+        reset_translation(sess)
+        return
+    
     st = time.time()
-    translated_text = await run_translate_async(sess, transcript)  # 내부에서 run_in_executor 사용
+    sess.current_transcript += " " + transcript
+    translated_text = await run_translate_async(sess)  # 내부에서 run_in_executor 사용
     dprint(f"[Translate {time.time() - st:.2f}s] - {translated_text!r}")
 
     translated_text = (translated_text or "").replace("<SKIP>", "").replace("...", "").strip()
+    sess.current_translated += " " + translated_text
 
-    # 히스토리 유지(다음 문장 품질↑)
-    sess.transcripts.append(transcript)
+    if "<END>" in translated_text:
+        reset_translation(sess)
+        return
 
-    sess.current_translated = ""
-
-async def run_translate_async(sess: Session, transcript="") -> str:
+async def run_translate_async(sess: Session) -> str:
     loop = asyncio.get_running_loop()
     current_translated = ""
     sent_chars = 0
@@ -321,11 +358,14 @@ async def run_translate_async(sess: Session, transcript="") -> str:
                 sent_chars = len(current_translated)
 
     def run_blocking():
-        return translate_simple(
+        lprint("translate", sess.transcripts[-5:], sess.current_transcript, sess.current_translated, sess.in_language, sess.out_language)
+        return translate(
             prevScripts=sess.transcripts[-5:],
-            current_scripted_sentence=transcript,
+            current_scripted_sentence=sess.current_transcript,
             current_translated=sess.current_translated,
             onToken=on_token,
+            input_language=sess.in_language,
+            output_language=sess.out_language,
         )
 
     output = await loop.run_in_executor(None, run_blocking)
@@ -341,7 +381,7 @@ async def run_translate_async(sess: Session, transcript="") -> str:
 
     # 최종 알림(중복 방지)
     def _g():
-        sess.out_q.put_nowait(jdumps({"type": "translated", "text": translated_text, "is_final": True}))
+        sess.out_q.put_nowait(jdumps({"type": "translated", "script": sess.current_transcript, "text": translated_text, "is_final": True}))
     loop.call_soon_threadsafe(_g)
 
     try:
@@ -411,7 +451,8 @@ async def chatter_streamer(sess: Session):
                     
                     async for evt in tts_model.generate_stream(
                         text_chunk,
-                        audio_prompt_path=ref_audio
+                        audio_prompt_path=ref_audio,
+                        language_id=sess.out_language
                     ):
                         if evt.get("type") == "chunk":
                             wav: torch.Tensor = evt["audio"]

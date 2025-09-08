@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from safetensors.torch import load_file as load_safetensors
 from huggingface_hub import snapshot_download
 import os
+import numpy as np
 
 from .models.t3 import T3
 from .models.t3.modules.t3_config import T3Config
@@ -152,6 +153,7 @@ class ChatterboxMultilingualTTS:
         self.device = device
         self.conds = conds
         self.watermarker = perth.PerthImplicitWatermarker()
+        self._cond_cache = {}  # key -> {"ve": tensor, "t3_prompt": tensor|None, "s3ref": dict}
 
     @classmethod
     def get_supported_languages(cls):
@@ -204,7 +206,19 @@ class ChatterboxMultilingualTTS:
         )
         return cls.from_local(ckpt_dir, device)
     
-    def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
+
+    def _cache_key(self, wav_fpath):
+        if isinstance(wav_fpath, str):
+            st = os.stat(wav_fpath)
+            return ("path", wav_fpath, st.st_size, int(st.st_mtime))
+        else:
+            import numpy as np, hashlib
+            x = np.asarray(wav_fpath, dtype=np.float32)
+            # 가벼운 해시 키 (길이/평균/표준편차 + 해시 앞부분)
+            h = hashlib.sha1(x[: min(len(x), 48000)].tobytes()).hexdigest()[:8]
+            return ("arr", len(x), float(x.mean()), float(x.std()), h)
+            
+    def prepare_conditionals1(self, wav_fpath, exaggeration=0.5):
         if isinstance(wav_fpath, str):
             s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
             ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
@@ -232,6 +246,46 @@ class ChatterboxMultilingualTTS:
         ).to(device=self.device)
         self.conds = Conditionals(t3_cond, s3gen_ref_dict)
 
+    @torch.inference_mode()
+    def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
+        key = self._cache_key(wav_fpath)
+        cached = self._cond_cache.get(key)
+
+        if cached is None:
+            # --- 로딩/리샘플 (float32 유지) ---
+            if isinstance(wav_fpath, str):
+                s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR, mono=True, dtype=np.float32)
+                ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR, res_type="soxr_qq")
+            else:
+                ref_16k_wav = np.asarray(wav_fpath, dtype=np.float32)
+                s3gen_ref_wav = librosa.resample(ref_16k_wav, orig_sr=16000, target_sr=S3GEN_SR, res_type="soxr_qq")
+
+            s3gen_ref_wav = s3gen_ref_wav[: self.DEC_COND_LEN]
+            s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR, device=self.device)
+
+            # Speech cond prompt tokens
+            t3_cond_prompt_tokens = None
+            if (plen := self.t3.hp.speech_cond_prompt_len):
+                s3_tokzr = self.s3gen.tokenizer
+                t3_cond_prompt_tokens, _ = s3_tokzr.forward([ref_16k_wav[: self.ENC_COND_LEN]], max_len=plen)
+                t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens).to(self.device)
+
+            # Voice-encoder speaker embedding
+            ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR)).to(self.device)
+            ve_embed = ve_embed.mean(dim=0, keepdim=True)
+
+            cached = {"ve": ve_embed, "t3_prompt": t3_cond_prompt_tokens, "s3ref": s3gen_ref_dict}
+            self._cond_cache[key] = cached
+
+        # 여기서는 emotion만 갱신 (재계산 없음)
+        t3_cond = T3Cond(
+            speaker_emb=cached["ve"],
+            cond_prompt_speech_tokens=cached["t3_prompt"],
+            emotion_adv=torch.full((1,1,1), float(exaggeration), device=self.device),
+        ).to(device=self.device)
+
+        self.conds = Conditionals(t3_cond, cached["s3ref"])
+        
     def generate(
         self,
         text,
@@ -306,13 +360,13 @@ class ChatterboxMultilingualTTS:
         self,
         text,
         language_id,
-        repetition_penalty=1.2,
+        repetition_penalty=2.0,
         min_p=0.05,
-        top_p=1.0,
+        top_p=0.8,
         audio_prompt_path=None,
         exaggeration=0.5,
         cfg_weight=0.5,
-        temperature=0.8,
+        temperature=0.6,
     ):
         # Validate language_id
         if language_id and language_id.lower() not in SUPPORTED_LANGUAGES:
@@ -321,7 +375,6 @@ class ChatterboxMultilingualTTS:
                 f"Unsupported language_id '{language_id}'. "
                 f"Supported languages: {supported_langs}"
             )
-        
         if audio_prompt_path is not None:
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
         else:
@@ -349,6 +402,7 @@ class ChatterboxMultilingualTTS:
         text_tokens = F.pad(text_tokens, (1, 0), value=sot)
         text_tokens = F.pad(text_tokens, (0, 1), value=eot)
 
+        # 캐싱으로 인해서 여기까지 걸리는 시간이 매우 짧다.
         audio_tokens = []
         with torch.inference_mode():
             response = self.t3.inference_streaming(
