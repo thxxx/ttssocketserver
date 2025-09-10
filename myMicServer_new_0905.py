@@ -51,7 +51,16 @@ for p in filler_audios_path:
     audiod = torch.tensor(audiod)
     filler_audios.append(pcm16_b64(audiod))
 
-prompt_wav_path = "./output.wav"
+ref_audio_sets = []
+# audiod, sr = librosa.load('./haha.mp3', sr=24000, mono=True)
+# audiod = torch.tensor(audiod)
+ref_audio_sets.append('./haha.mp3')
+
+prompt_wav_path = "./elv.mp3"
+# audiod, sr = librosa.load(prompt_wav_path, sr=24000, mono=True)
+# audiod = torch.tensor(audiod)
+ref_audio_sets.append(prompt_wav_path)
+
 
 DEBUG = True
 def dprint(*a, **k): 
@@ -76,6 +85,7 @@ LLM = None
 
 INPUT_SAMPLE_RATE = 24000
 WHISPER_SR = 16000
+END_WORDS = [".", "!", "?", "。", "！", "？"]
 
 @app.on_event("startup")
 def init_models():
@@ -190,7 +200,8 @@ async def ws_endpoint(ws: WebSocket):
 
                                 if vad_event == "start":
                                     cancel_end_timer(sess)
-                                    if not likely_voice(np.concatenate(list(sess.pre_roll) + [audio]).astype(np.float32, copy=False))[1] > 0.1:
+                                    print("Come", likely_voice(np.concatenate(list(sess.pre_roll) + [audio])))
+                                    if not likely_voice(np.concatenate(list(sess.pre_roll) + [audio]).astype(np.float32, copy=False))[1] > 0.02:
                                         continue
                                     sess.current_audio_state = "start"
                                     if len(sess.pre_roll) > 0:
@@ -209,9 +220,13 @@ async def ws_endpoint(ws: WebSocket):
                             if vad_event == "end" and sess.transcript != "":
                                 # 이때까지 자동으로 script 따던게 있을테니 그걸 리턴한다.
                                 print("[Voice End] - ", sess.transcript)
-                                await sess.out_q.put(jdumps({"type": "transcript", "text": sess.transcript, "is_final": True}))
+                                await sess.out_q.put(jdumps({"type": "transcript", "text": sess.transcript.strip(), "is_final": True}))
                                 sess.current_audio_state = "none"
-                                # sess.ref_audios.put(sess.audios)
+                                if "하하" in sess.transcript:
+                                    lprint("\nHaha generation!\n")
+                                    sess.ref_audios.put(ref_audio_sets[0])
+                                else:
+                                    sess.ref_audios.put(ref_audio_sets[1])
                                 sess.audios = np.empty(0, dtype=np.float32)
                                 sess.end_scripting_time = time.time()
                                 
@@ -257,7 +272,7 @@ async def ws_endpoint(ws: WebSocket):
                         except:
                             print("\n\n\nMax translation queue!\n\n")
                         sess.transcript = ""
-                        arm_end_timer(sess, delay=3)
+                        # arm_end_timer(sess, delay=3)
                     
                     sess.current_audio_state = "none"
                     # sess.ref_audios.put(sess.audios)
@@ -321,7 +336,7 @@ async def translate_one(sess: Session, transcript: str):
     translated_text = (translated_text or "").replace("<SKIP>", "").replace("...", "").strip()
     sess.current_translated += " " + translated_text
 
-    if "<END>" in translated_text:
+    if len(translated_text) > 5 and translated_text[-1] in END_WORDS and translated_text[-3:] != "...":
         reset_translation(sess)
         return
 
@@ -344,6 +359,7 @@ async def run_translate_async(sess: Session) -> str:
         return re.sub(r"<[^>]*>", "", text)
 
     def on_token(tok: str):
+        safe_push_out({"type": "translated", "text": tok, "is_final": False})
         return
         nonlocal current_translated, sent_chars
         if not tok:
@@ -379,9 +395,14 @@ async def run_translate_async(sess: Session) -> str:
             sess.tts_in_q.put_nowait(tail)
         loop.call_soon_threadsafe(_f)
 
+    cts = sess.current_transcript
+    if len(translated_text) > 5 and translated_text[-1] in END_WORDS and translated_text[-3:] != "...":
+        translated_text += "<END>"
+        reset_translation(sess)
+    
     # 최종 알림(중복 방지)
     def _g():
-        sess.out_q.put_nowait(jdumps({"type": "translated", "script": sess.current_transcript, "text": translated_text, "is_final": True}))
+        sess.out_q.put_nowait(jdumps({"type": "translated", "script": cts, "text": translated_text, "is_final": True}))
     loop.call_soon_threadsafe(_g)
 
     try:
@@ -423,12 +444,6 @@ async def chatter_streamer(sess: Session):
                 async def emit_frames_from(out_chunk: torch.Tensor):
                     b64 = await loop.run_in_executor(ENC_EXEC, pcm16_b64, out_chunk)
 
-                    # if out_chunk.ndim == 2 and out_chunk.shape[0] >= 1:
-                    #     out_chunk = out_chunk[0]
-
-                    # pcm = (torch.clamp(out_chunk.detach(), -1.0, 1.0) * 32767.0).to(torch.int16).cpu().numpy().tobytes()
-                    # b64 = base64.b64encode(pcm).decode()
-                    # lprint("Send audio")
                     print("Chunk send ", time.time() - t0)
                     sess.out_q.put_nowait(jdumps({
                         "type": "tts_audio",
@@ -444,15 +459,18 @@ async def chatter_streamer(sess: Session):
                 try:
                     if not sess.ref_audios.empty():
                         ref_audio = sess.ref_audios.get()
-                        sess.ref_audios.put(ref_audio)
-                        ref_audio = normalize(ref_audio[-int(16000*9):])*0.9
+                        # sess.ref_audios.put(ref_audio)
+                        # ref_audio = normalize(ref_audio[-int(16000*9):])*0.9
                     else:
                         ref_audio = prompt_wav_path
+                    lprint("TTS generation - ", text_chunk)
                     
                     async for evt in tts_model.generate_stream(
                         text_chunk,
                         audio_prompt_path=ref_audio,
-                        language_id=sess.out_language
+                        language_id=sess.out_language,
+                        chunk_size=25,
+                        temperature=1.1
                     ):
                         if evt.get("type") == "chunk":
                             wav: torch.Tensor = evt["audio"]

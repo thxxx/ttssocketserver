@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from .matcha.flow_matching import BASECFM
 from .configs import CFM_PARAMS
-
+import time
 
 class ConditionalCFM(BASECFM):
     def __init__(self, in_channels, cfm_params, n_spks=1, spk_emb_dim=64, estimator: torch.nn.Module = None):
@@ -69,6 +69,7 @@ class ConditionalCFM(BASECFM):
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), flow_cache
 
+    @torch.inference_mode()
     def solve_euler(self, x, t_span, mu, mask, spks, cond):
         """
         Fixed euler solver for ODEs.
@@ -98,6 +99,8 @@ class ConditionalCFM(BASECFM):
         t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
         spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
         cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        
+        st = time.time()
         for step in range(1, len(t_span)):
             # Classifier-Free Guidance inference introduced in VoiceBox
             x_in[:] = x
@@ -119,7 +122,6 @@ class ConditionalCFM(BASECFM):
             sol.append(x)
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
-
         return sol[-1].float()
 
     def forward_estimator(self, x, mask, mu, t, spks, cond):

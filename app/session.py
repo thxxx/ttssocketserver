@@ -82,10 +82,7 @@ def cancel_end_timer(sess):
 def arm_end_timer(sess, delay=3):
     cancel_end_timer(sess)
     async def _timer():
-        try:
-            await asyncio.sleep(delay)
-            await sess.out_q.put(jdumps({"type": "translated", "script": None, "text": "<END>", "is_final": True}))
-            sess.translate_q.put_nowait("<END>")
-        except asyncio.CancelledError:
-            pass
+        await asyncio.sleep(delay)
+        await sess.out_q.put(jdumps({"type": "translated", "script": None, "text": "<END>", "is_final": True}))
+    
     sess.end_task = asyncio.create_task(_timer())

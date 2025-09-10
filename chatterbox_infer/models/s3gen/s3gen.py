@@ -98,6 +98,7 @@ class S3Token2Mel(torch.nn.Module):
         )
 
         self.resamplers = {}
+        self._hift_cache = None
 
     @property
     def device(self):
@@ -247,7 +248,10 @@ class S3Token2Wav(S3Token2Mel):
         output_mels = super().forward(speech_tokens, ref_wav=ref_wav, ref_sr=ref_sr, ref_dict=ref_dict, finalize=finalize)
 
         # TODO jrm: ignoring the speed control (mel interpolation) and the HiFTGAN caching mechanisms for now.
-        hift_cache_source = torch.zeros(1, 1, 0).to(self.device)
+        if self._hift_cache is None:
+            hift_cache_source = torch.zeros(1, 1, 0).to(self.device)
+        else:
+            hift_cache_source = self._hift_cache
 
         output_wavs, *_ = self.mel2wav.inference(speech_feat=output_mels, cache_source=hift_cache_source)
 
@@ -275,6 +279,17 @@ class S3Token2Wav(S3Token2Mel):
         if cache_source is None:
             cache_source = torch.zeros(1, 1, 0).to(self.device)
         return self.mel2wav.inference(speech_feat=speech_feat, cache_source=cache_source)
+    
+    @torch.inference_mode()
+    def hift_inference_with_cache(self, speech_feat, cache_source: torch.Tensor = None):
+        if cache_source is None:
+            if self._hift_cache is None:
+                self._hift_cache = torch.zeros(1, 1, 0, device=self.device)
+            cache_source = self._hift_cache
+        
+        out_wav, out_cache = self.mel2wav.inference(speech_feat=speech_feat, cache_source=cache_source)
+        self._hift_cache = out_cache  # 다음 호출에 재사용
+        return out_wav, out_cache
 
     @torch.inference_mode()
     def inference(
@@ -290,8 +305,6 @@ class S3Token2Wav(S3Token2Mel):
     ):
         output_mels = self.flow_inference(speech_tokens, ref_wav=ref_wav, ref_sr=ref_sr, ref_dict=ref_dict, finalize=finalize)
         output_wavs, output_sources = self.hift_inference(output_mels, cache_source)
-
-        # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
         output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
 
         return output_wavs, output_sources

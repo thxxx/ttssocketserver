@@ -159,6 +159,7 @@ def load_asr_backend(
             "HF_ASR_MODEL",
             # "/home/khj6051/whisper/whisper-turbo-ko-sixth/checkpoint-6000"
             "o0dimplz0o/Whisper-Large-v3-turbo-STT-Zeroth-KO-v2",
+            # "openai/whisper-large-v3-turbo",
         )
         device = kwargs.get("device")
         dtype = kwargs.get("dtype")

@@ -14,7 +14,6 @@
 import logging
 import random
 from typing import Dict, Optional
-
 logger = logging.getLogger(__name__)
 import torch
 import torch.nn as nn
@@ -278,6 +277,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         conds = conds.transpose(1, 2)
 
         mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]))).to(h)
+        # 이친구가 오래 걸린다!
         feat, _ = self.decoder(
             mu=h.transpose(1, 2).contiguous(),
             mask=mask.unsqueeze(1),

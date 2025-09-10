@@ -12,7 +12,6 @@ from huggingface_hub import snapshot_download
 import os
 import numpy as np
 import time
-import asyncio
 
 from .models.t3 import T3
 from .models.t3.modules.t3_config import T3Config
@@ -360,7 +359,7 @@ class ChatterboxMultilingualTTS:
             # print(f"s3gen decoder - {time.time() - st:.3f}")
             wav = wav.squeeze(0).detach().cpu().numpy()
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
-        return watermarked_wav
+        return torch.from_numpy(watermarked_wav).unsqueeze(0)
 
     async def generate_stream(
         self,
@@ -376,74 +375,75 @@ class ChatterboxMultilingualTTS:
         chunk_size=20,
     ):
         print(f"generate_stream - {language_id}")
+        # Validate language_id
         if language_id and language_id.lower() not in SUPPORTED_LANGUAGES:
             supported_langs = ", ".join(SUPPORTED_LANGUAGES.keys())
-            raise ValueError(f"Unsupported language_id '{language_id}'. Supported: {supported_langs}")
-
+            raise ValueError(
+                f"Unsupported language_id '{language_id}'. "
+                f"Supported languages: {supported_langs}"
+            )
         if audio_prompt_path is not None:
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
         else:
             assert self.conds is not None, "Please `prepare_conditionals` first or specify `audio_prompt_path`"
 
-        # 토큰화
+        # Update exaggeration if needed
+        if exaggeration != self.conds.t3.emotion_adv[0, 0, 0]:
+            _cond: T3Cond = self.conds.t3
+            self.conds.t3 = T3Cond(
+                speaker_emb=_cond.speaker_emb,
+                cond_prompt_speech_tokens=_cond.cond_prompt_speech_tokens,
+                emotion_adv=exaggeration * torch.ones(1, 1, 1),
+            ).to(device=self.device)
+
+        # Norm and tokenize text
         text = punc_norm(text)
-        text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id.lower()).to(self.device)
-        text_tokens = torch.cat([text_tokens, text_tokens], dim=0)
+        text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id.lower() if language_id else None).to(self.device)
+        text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
+
         sot = self.t3.hp.start_text_token
         eot = self.t3.hp.stop_text_token
         text_tokens = F.pad(text_tokens, (1, 0), value=sot)
         text_tokens = F.pad(text_tokens, (0, 1), value=eot)
 
+        # self.conds.t3.to(dtype=torch.bfloat16)
+        # self.s3gen.to(dtype=torch.bfloat16)
+        # self.s3gen.inference = torch.compile(self.s3gen.inference, fullgraph=True, backend="cudagraphs")
+
+        # 캐싱으로 인해서 여기까지 걸리는 시간이 매우 짧다.
         audio_tokens = []
-        decode_tasks = set()
-
-        async def run_decoder(speech_tokens, ref_dict):
-            wav, _ = self.s3gen.inference(
-                speech_tokens=speech_tokens,
-                ref_dict=ref_dict,
-            )
-            # yield는 async def 안에서는 불가하므로 큐로 전달
-            return {"type": "chunk", "audio": wav}
-
+        cached_wav = None
         with torch.inference_mode():
             response = self.t3.inference_streaming(
                 t3_cond=self.conds.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=500,
+                max_new_tokens=500,  # TODO: use the value in config
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,
                 min_p=min_p,
                 top_p=top_p,
             )
-
             for buf in response:
-                if buf["type"] == "token":
-                    audio_tokens.append(buf["token_id"])
+                if buf['type'] == 'token':
+                    audio_tokens.append(buf['token_id'])
+                
+                if (buf['type'] == 'token' and len(audio_tokens)%chunk_size == (chunk_size-1)) or (buf['type'] == 'eos' and len(audio_tokens)>0):
+                    speech_tokens = torch.cat(audio_tokens, dim=-1)
+                    speech_tokens = speech_tokens[0]
+                    speech_tokens = drop_invalid_tokens(speech_tokens)
+                    # speech_tokens = speech_tokens[speech_tokens < 6561]
+                    speech_tokens = speech_tokens.to(self.device)
 
-                # chunk_size마다 디코더 태스크 실행
-                if (buf["type"] == "token" and len(audio_tokens) % chunk_size == (chunk_size - 1)) \
-                or (buf["type"] == "eos" and len(audio_tokens) > 0):
-                    if buf["type"] == "eos" and len(audio_tokens) > 7:
-                        audio_tokens = audio_tokens[:-7]
-                    if buf["type"] == "eos" and len(audio_tokens) <= 7:
-                        continue
-                    speech_tokens = torch.cat(audio_tokens, dim=-1)[0]
-                    speech_tokens = drop_invalid_tokens(speech_tokens).to(self.device)
-
-                    # 디코더를 백그라운드에서 실행
-                    task = asyncio.create_task(run_decoder(speech_tokens, self.conds.gen))
-                    decode_tasks.add(task)
-
-                    # 끝난 태스크는 yield
-                    done, decode_tasks = await asyncio.wait(
-                        decode_tasks, return_when=asyncio.FIRST_COMPLETED
+                    st = time.time()
+                    wav, cw = self.s3gen.inference(
+                        speech_tokens=speech_tokens,
+                        ref_dict=self.conds.gen,
+                        # cache_source=cached_wav,
                     )
-                    for d in done:
-                        yield d.result()
-
-            # 남은 태스크도 모두 마무리
-            for t in await asyncio.gather(*decode_tasks):
-                yield t
-
+                    print(f"s3gen decoder - {time.time() - st:.3f}")
+                    yield {"type": "chunk", "audio": wav}
+                    cached_wav = cw
+                    # audio_tokens = []
+            
         yield {"type": "eos"}

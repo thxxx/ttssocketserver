@@ -31,9 +31,7 @@ LANGUAGE_CODE = {
     "Chinese": "zh",
 }
 
-# 키와 값을 반대로 뒤집은 dict
 LANGUAGE_CODE_REVERSED = {v: k for k, v in LANGUAGE_CODE.items()}
-
 
 client = OpenAI(api_key=OPENAI_KEY)
 
@@ -110,7 +108,7 @@ def translate(prevScripts:str, current_scripted_sentence:str, current_translated
 You are translating {input_language} speech into {output_language}.
 
 <previous utterances> are the sentences spoken before the current one. Use them for context.  
-<speaking {input_language}> is the current spoken input that needs to be translated.  
+<speaking korean> is the current spoken input that needs to be translated.  
 <{output_language}> is the translation generated so far.  
 
 The input comes from speech-to-text, so there may be transcription errors due to pronunciation. Please take this into account when translating.  
@@ -121,11 +119,11 @@ Do not start with words like “Oh”, “So”, “Uhm”, or “Huh”.
 If the {input_language} input seems incomplete (cut off mid-sentence), output an unfinished {output_language} sentence too, so it can be naturally continued. You don’t need to force a full translation of every fragment if it isn’t complete yet.
 한글 종결 어미의 특징 : ~~요. ~~니다. ~~어.
 
-If there is already some translated {output_language}, continue from it. !Do not include the previous translation in the output never!
-The earlier translation may not be perfect — refine it naturally into spoken {output_language}. Only output the additional translated part.  
+Continue from existing {output_language} translation.  
+Do not echo or include the existing translation in the output — return only the newly translated continuation.
 
-If the current {input_language} input is fully translated and nothing else needs to be added, end with `<END>`.  
-If more input is likely to follow, end with `...`.  
+- If more input is likely to follow, end with `...`.
+- If the current {input_language} input + context forms a COMPLETE sentence in {output_language}, Do not end with `...`.
 
 # Real-Time Translation Tips
 1. **Avoid Premature Subject Translation**
@@ -134,8 +132,8 @@ If more input is likely to follow, end with `...`.
 - If there’s even slight ambiguity, avoid explicitly translating the subject ("I", "we", "they", etc.) and use neutral or impersonal expressions instead.
 - Example:
   - Korean: “마케팅비를 청구해야 한다”
-  - Preferred: “Marketing costs must also be claimed.<END>”
-  - Not: “I should claim the marketing costs.<END>”
+  - Preferred: “Marketing costs must also be claimed.”
+  - Not: “I should claim the marketing costs.”
 - Example:
   - Korean: "내일 집에"
   - Preferred: "Tomorrow,"
@@ -146,23 +144,23 @@ If more input is likely to follow, end with `...`.
 - Example: “운동장에가서 축구를…”
   - Preferred: "I'll go to the sports field and..." # Still don't know whether they will play soccer or watch. Just skip the sentence, because there will be more input to come next.
   - Not: "I'll go to the sports field and play soccer..." # This is not correct, because next input can be "축구를 봤어."
+- Example: "오늘 아침에 밥을"
+  - Preferred: "This morning," # Still don't know whether they will eat breakfast or not. You dont have to include all words in the input.
+  - Not: "I had breakfast this morning."
 
-EXAMPLE:
-<speaking {input_language}>: 오늘 오후에 회의가 잡혀 있어서 그 전에 자료를 정리하고
-<{output_language}>: I have a meeting
-Output: scheduled this afternoon...
-
-<speaking {input_language}>: 디자인 시안 수정본은 오늘 중으로 전달드릴 예정이고, 개발 쪽에도 공유해둘게요.
-<{output_language}>: The revised design draft will be sent over today,
-Output: and I'll also share it with the dev team.<END>
+3. 실제 대화처럼, speaking으로 들어온 사소한 말버릇 까지도 번역에 포함해줘.
+- Example: "저기, 어… 우리 우리 그때 같이 갔던 카페 있잖아."
+  - Preferred: "Hey, um… you know, that café we, we went to back then?"
+  - Not: "You know that café we went to back then?"
+같은 단어를 반복하면, 번역도 반복해줘.
 
 -- INPUT --  
 <previous utterances> {hist}  
 <speaking {input_language}> : {current_scripted_sentence}  
-<{output_language}> : {current_translated}  
+<{output_language}> : {current_translated}
 """}
         ],
-        temperature=0.1,
+        temperature=0.2,
         user="k2e-translator-v1-hojinkhj6051230808",
         prompt_cache_key="k2e-translator-v1-hojinkhj6051230808",
         stream=True,

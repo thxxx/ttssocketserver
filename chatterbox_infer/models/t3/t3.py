@@ -227,6 +227,7 @@ class T3(nn.Module):
         length_penalty=1.0,
         repetition_penalty=1.2,
         cfg_weight=0.5,
+        max_cache_len=500
     ):
         """
         Args:
@@ -279,23 +280,6 @@ class T3(nn.Module):
             self.patched_model = patched_model
             self.compiled = True
 
-        # # Run normal generate method, which calls our custom extended methods
-        # return self.patched_model.generate(
-        #     inputs=initial_speech_tokens,
-        #     decoder_cond=embeds,
-        #     bos_token_id=self.hp.start_speech_token,
-        #     eos_token_id=(self.hp.stop_speech_token if stop_on_eos else -1),
-        #     pad_token_id=self.hp.stop_speech_token,
-        #     max_new_tokens=max_new_tokens or self.hp.max_speech_tokens,
-        #     num_return_sequences=num_return_sequences,
-        #     temperature=temperature,
-        #     min_p=min_p,
-        #     length_penalty=length_penalty,
-        #     repetition_penalty=repetition_penalty,
-        #     do_sample=do_sample,
-        #     # cache_implementation=None if not self.compiled else "static",
-        # )
-
         device = embeds.device
 
         bos_token = torch.tensor([[self.hp.start_speech_token]], dtype=torch.long, device=device)
@@ -313,7 +297,6 @@ class T3(nn.Module):
         predicted = []  # To store the predicted tokens
 
         # Instantiate the logits processors.
-        top_p_warper = TopPLogitsWarper(top_p=top_p)
         min_p_warper = MinPLogitsWarper(min_p=min_p)
         top_p_warper = TopPLogitsWarper(top_p=top_p)
         repetition_penalty_processor = RepetitionPenaltyLogitsProcessor(penalty=float(repetition_penalty))
@@ -333,6 +316,7 @@ class T3(nn.Module):
 
         # ---- Generation Loop using kv_cache ----
         for i in tqdm(range(max_new_tokens), desc="Sampling", dynamic_ncols=True):
+            st = time.time()
             logits_step = output.logits[:, -1, :]                
             # CFG combine  → (1, V)
             cond   = logits_step[0:1, :]
@@ -390,6 +374,8 @@ class T3(nn.Module):
             # Update the kv_cache.
             past = output.past_key_values
 
+            # print(f"Time taken: {time.time() - st:.3f}")
+
         # Concatenate all predicted tokens along the sequence dimension.
         predicted_tokens = torch.cat(predicted, dim=1)  # shape: (B, num_tokens)
         return predicted_tokens
@@ -418,8 +404,6 @@ class T3(nn.Module):
         assert prepend_prompt_speech_tokens is None, "not implemented"
         _ensure_BOT_EOT(text_tokens, self.hp)
         text_tokens = torch.atleast_2d(text_tokens).to(dtype=torch.long, device=self.device)
-
-        start_time = time.time()
 
         # Default initial speech to a single start-of-speech token
         if initial_speech_tokens is None:
@@ -485,22 +469,19 @@ class T3(nn.Module):
             inputs_embeds=inputs_embeds,
             past_key_values=None,
             use_cache=True,
-            # output_attentions=True,
+            output_attentions=True,
             output_hidden_states=True,
             return_dict=True,
         )
         # Initialize kv_cache with the full context.
         past = output.past_key_values
-        # print("여기까지 걸리는 시간은? ", time.time() - start_time) # 약 25ms, 거의 없음.
 
-        start_time = time.time()
+        cfg = torch.as_tensor(cfg_weight, device=device, dtype=embeds.dtype)
         # ---- Generation Loop using kv_cache ----
         for i in range(max_new_tokens):
             logits_step = output.logits[:, -1, :]                
-            # CFG combine  → (1, V)
             cond   = logits_step[0:1, :]
             uncond = logits_step[1:2, :]
-            cfg = torch.as_tensor(cfg_weight, device=cond.device, dtype=cond.dtype)
             logits = cond + cfg * (cond - uncond)
             
             # Apply alignment stream analyzer integrity checks
@@ -521,22 +502,19 @@ class T3(nn.Module):
                 
             # Apply min_p and top_p filtering
             logits = min_p_warper(ids_for_proc, logits)
+            logits = top_p_warper(ids_for_proc, logits)
+
 
             # Convert logits to probabilities and sample the next token.
             probs = torch.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)  # shape: (B, 1)
+
+            if next_token.view(-1) == self.hp.stop_speech_token:
+                yield {"type": "eos"}
+                break
             
             yield {"type": "token", "token_id": next_token}
             generated_ids = torch.cat([generated_ids, next_token], dim=1)
-
-            # # Check for EOS token.
-            # if next_token.view(-1) == self.hp.stop_speech_token:
-            #     logger.info(f"✅ EOS token detected! Stopping generation at step {i+1}")
-            #     break
-            # 3) EOS 처리
-            if next_token.item() == self.hp.stop_speech_token:
-                yield {"type": "eos"}
-                break
 
             # Get embedding for the new token.
             next_token_embed = self.speech_emb(next_token)
@@ -545,16 +523,13 @@ class T3(nn.Module):
             #  For CFG
             next_token_embed = torch.cat([next_token_embed, next_token_embed])
 
-            # Forward pass with only the new token and the cached past.
-            output = self.patched_model(
+            # 여기까지는 거의 얼마 안걸린다. 1ms
+            output = self.patched_model( # 이 함수가 31ms 정도 소요
                 inputs_embeds=next_token_embed,
                 past_key_values=past,
-                # output_attentions=True,
+                output_attentions=True,
                 output_hidden_states=True,
                 return_dict=True,
             )
-            # Update the kv_cache.
             past = output.past_key_values
-            start_time = time.time()
-
-        yield {"type": "eos"}
+        # yield {"type": "eos"}
