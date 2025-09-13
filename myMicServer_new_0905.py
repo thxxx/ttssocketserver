@@ -82,6 +82,8 @@ global ASR, tts_model
 ASR = None
 tts_model = None
 LLM = None
+ASR = load_asr_backend(kind="en")
+tts_model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
 
 INPUT_SAMPLE_RATE = 24000
 WHISPER_SR = 16000
@@ -160,9 +162,9 @@ async def ws_endpoint(ws: WebSocket):
                     global ASR, tts_model
                     lprint("Start ", data);
 
-                    if sess.in_language != data.get("in_language", "ko") or ASR is None:
-                        sess.in_language = data.get("in_language", "ko")
-                        ASR = load_asr_backend(kind=sess.in_language)
+                    # if sess.in_language != data.get("in_language", "ko") or ASR is None:
+                    #     sess.in_language = data.get("in_language", "ko")
+                    #     ASR = load_asr_backend(kind=sess.in_language)
 
                     # if sess.out_language != data.get("out_language", "en") or tts_model is None:
                     sess.out_language = data.get("out_language", "en")
@@ -217,26 +219,26 @@ async def ws_endpoint(ws: WebSocket):
                             sess.audios = np.concatenate([sess.audios, audio])
                             sess.buf_count += 1
 
-                            if vad_event == "end" and sess.transcript != "":
-                                # 이때까지 자동으로 script 따던게 있을테니 그걸 리턴한다.
-                                print("[Voice End] - ", sess.transcript)
-                                await sess.out_q.put(jdumps({"type": "transcript", "text": sess.transcript.strip(), "is_final": True}))
-                                sess.current_audio_state = "none"
-                                if "하하" in sess.transcript:
-                                    lprint("\nHaha generation!\n")
-                                    sess.ref_audios.put(ref_audio_sets[0])
-                                else:
-                                    sess.ref_audios.put(ref_audio_sets[1])
-                                sess.audios = np.empty(0, dtype=np.float32)
-                                sess.end_scripting_time = time.time()
+                            # if vad_event == "end" and sess.transcript != "":
+                            #     # 이때까지 자동으로 script 따던게 있을테니 그걸 리턴한다.
+                            #     print("[Voice End] - ", sess.transcript)
+                            #     await sess.out_q.put(jdumps({"type": "transcript", "text": sess.transcript.strip(), "is_final": True}))
+                            #     sess.current_audio_state = "none"
+                            #     if "하하" in sess.transcript:
+                            #         lprint("\nHaha generation!\n")
+                            #         sess.ref_audios.put(ref_audio_sets[0])
+                            #     else:
+                            #         sess.ref_audios.put(ref_audio_sets[1])
+                            #     sess.audios = np.empty(0, dtype=np.float32)
+                            #     sess.end_scripting_time = time.time()
                                 
-                                try:
-                                    sess.translate_q.put_nowait(sess.transcript)
-                                except:
-                                    print("\n\n\nMax translation queue!\n\n")
-                                # arm_end_timer(sess, delay=3)
-                                sess.transcript = ""
-                                continue
+                            #     try:
+                            #         sess.translate_q.put_nowait(sess.transcript)
+                            #     except:
+                            #         print("\n\n\nMax translation queue!\n\n")
+                            #     # arm_end_timer(sess, delay=3)
+                            #     sess.transcript = ""
+                            #     continue
                             
                             if sess.buf_count%11==10 and sess.current_audio_state == "start":
                                 st = time.time()
@@ -336,7 +338,7 @@ async def translate_one(sess: Session, transcript: str):
     translated_text = (translated_text or "").replace("<SKIP>", "").replace("...", "").strip()
     sess.current_translated += " " + translated_text
 
-    if len(translated_text) > 5 and translated_text[-1] in END_WORDS and translated_text[-3:] != "...":
+    if len(translated_text) > 5 and translated_text[-1] in END_WORDS and translated_text[-2:] != "..":
         reset_translation(sess)
         return
 

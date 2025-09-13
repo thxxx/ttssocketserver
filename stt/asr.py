@@ -124,6 +124,7 @@ class NemoASRBackend:
         audio = _ensure_sr(audio, sample_rate, WHISPER_SR)
 
         result = self.model.transcribe(audio, source_lang='en', target_lang='en')
+        print("result : ", result)
         
         if isinstance(result, (list, tuple)) and len(result) > 0:
             # canary 계열은 특수 토큰이 섞일 수 있음

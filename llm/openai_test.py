@@ -5,6 +5,7 @@ import time
 
 OPENAI_KEY = os.environ.get("OPENAI_KEY")
 
+
 LANGUAGE_CODE = {
     "Arabic": "ar",
     "Danish": "da",
@@ -95,7 +96,7 @@ Do not start with word like Oh, So, Uhm, Huh, etc.
         "ttft": first
     }
 
-def translate(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken, input_language:str = 'Korean', output_language:str = 'English'):
+def translate2(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken, input_language:str = 'Korean', output_language:str = 'English'):
     hist = "\n".join([f" me:{x}," for x in prevScripts])
     input_language = LANGUAGE_CODE_REVERSED[input_language]
     output_language = LANGUAGE_CODE_REVERSED[output_language]
@@ -153,9 +154,83 @@ Do not echo or include the existing translation in the output — return only th
   - Preferred: "Hey, um… you know, that café we, we went to back then?"
   - Not: "You know that café we went to back then?"
 같은 단어를 반복하면, 번역도 반복해줘.
+한글로 번역한다면, 요. 혹은 다. 로 끝나는 존댓말로 번역해줘
+
+이건 고유명사 목록이고, 굳이 한글로 번역할 필요없어.
+고유명사 목록 ['Sonus', 'Google']
+
+Ex) 
+You don't have to worry about that because. We take the whole context when translating.
+그건 걱정하지 않으셔도 돼요 왜냐하면.. 우리는 전체 문맥을 고려해서 번역하거든요.
+
+And accuracy is our first priority.
+우리는 정확도를 첫번째 우선순위로 둡니다.
 
 -- INPUT --  
 <previous utterances> {hist}  
+<speaking {input_language}> : {current_scripted_sentence}  
+<{output_language}> : {current_translated}
+"""}
+        ],
+        temperature=0.2,
+        user="k2e-translator-v1-hojinkhj6051230808",
+        prompt_cache_key="k2e-translator-v1-hojinkhj6051230808",
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+
+    sent = ''
+    first = 0
+    st = time.time()
+
+    pt = 0
+    pt_cached = 0
+    ct = 0
+
+    for chunk in response:
+        if chunk.usage and chunk.usage is not None:
+            u = chunk.usage;
+            pt += u.prompt_tokens
+            pt_cached += u.prompt_tokens_details.cached_tokens
+            ct += u.completion_tokens
+        else:
+            if chunk.choices[0].delta.content != '' and chunk.choices[0].delta.content is not None:
+                onToken(chunk.choices[0].delta.content)
+                sent += chunk.choices[0].delta.content
+
+    return {
+        "text": sent,
+        "prompt_tokens": pt,
+        "prompt_tokens_cached": pt_cached,
+        "completion_tokens": ct
+    }
+
+
+def translate(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken, input_language:str = 'Korean', output_language:str = 'English'):
+    hist = "\n".join([f" me:{x}," for x in prevScripts])
+    input_language = LANGUAGE_CODE_REVERSED[input_language]
+    output_language = LANGUAGE_CODE_REVERSED[output_language]
+    
+    response = client.chat.completions.create(
+        model='gpt-4.1-mini',  # 최신 경량 모델
+        messages=[
+            {"role": "system", "content": f"You are a professional translator specializing in [{input_language}] → [{output_language}] translation."},
+            {"role": "user", "content": f"""
+아래 영어 문장이 들어오면, 아래 한글 문장을 리턴해줘.
+
+Ex) 
+You don't have to worry about that because.
+그건 걱정하지 않으셔도 돼요 왜냐하면.. 
+
+We take the whole context when translating.
+우리는 전체 문맥을 고려해서 번역하거든요.
+
+And accuracy is our first priority.
+우리는 정확도를 첫번째 우선순위로 둡니다.
+
+이미 들어온 한글문장이 있으면 그 뒤에 들어가야할 것만 리턴해줘.
+
+-- INPUT --  
 <speaking {input_language}> : {current_scripted_sentence}  
 <{output_language}> : {current_translated}
 """}
