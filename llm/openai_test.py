@@ -96,7 +96,7 @@ Do not start with word like Oh, So, Uhm, Huh, etc.
         "ttft": first
     }
 
-def translate2(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken, input_language:str = 'Korean', output_language:str = 'English'):
+def translate(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken, input_language:str = 'Korean', output_language:str = 'English'):
     hist = "\n".join([f" me:{x}," for x in prevScripts])
     input_language = LANGUAGE_CODE_REVERSED[input_language]
     output_language = LANGUAGE_CODE_REVERSED[output_language]
@@ -206,7 +206,7 @@ And accuracy is our first priority.
     }
 
 
-def translate(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken, input_language:str = 'Korean', output_language:str = 'English'):
+def translate33(prevScripts:str, current_scripted_sentence:str, current_translated:str, onToken, input_language:str = 'Korean', output_language:str = 'English'):
     hist = "\n".join([f" me:{x}," for x in prevScripts])
     input_language = LANGUAGE_CODE_REVERSED[input_language]
     output_language = LANGUAGE_CODE_REVERSED[output_language]

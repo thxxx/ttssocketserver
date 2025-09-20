@@ -40,11 +40,17 @@ class Session:
         self.out_language = "en"
         self.tts_ws = None
         self.tts_task: Optional[asyncio.Task] = None
+        self.stt_task: Optional[asyncio.Task] = None
         self.tts_in_q: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
+
+        # ---- 전역/세션 초기화 시 ----
+        self.stt_in_q: asyncio.Queue[bytes]  = asyncio.Queue(maxsize=2)   # 최신 청크 위주
+        self.stt_out_q: asyncio.Queue[dict]  = asyncio.Queue(maxsize=32)  # {"type": "delta"/"final", "text": ...}
 
         self.tts_buf: list[str] = []
         self.tts_debounce_task: Optional[asyncio.Task] = None
         self.buf_count = 0
+        self.buf_length = 0
 
         # 로깅/통계
         self.start_scripting_time = 0
